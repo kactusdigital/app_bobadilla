@@ -1,0 +1,6 @@
+{
+  "name": "Bobadilla Viveros",
+  "description": "Sistema de gestión de cultivos, partes diarios y liquidación de haberes agrícolas con sincronización bidireccional en Supabase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
