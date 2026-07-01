@@ -7,14 +7,16 @@ import AddEntry from './components/AddEntry';
 import Payroll from './components/Payroll';
 import Config from './components/Config';
 import Login from './components/Login';
-import { 
-  performBidirectionalSync, 
-  getCurrentSupabaseUser, 
-  logoutSupabaseUser, 
+import {
+  performBidirectionalSync,
+  fetchServerEntries,
+  getCurrentSupabaseUser,
+  logoutSupabaseUser,
   SupabaseUser,
   fetchPendingWhatsAppMessages
 } from './supabaseClient';
 import { WhatsAppMessages } from './components/WhatsAppMessages';
+import { runWorkerDedupeMigration } from './migrations';
 
 // Lucide-Icons
 import { 
@@ -60,24 +62,12 @@ export default function App() {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        let user = await getCurrentSupabaseUser();
-        
-        // AUTO-LOGIN ANONYMOUSLY IF ENABLED
-        if (!user) {
-          const { createSupabaseInstance } = await import('./supabaseClient');
-          const client = createSupabaseInstance();
-          if (client) {
-            const { data, error } = await client.auth.signInAnonymously();
-            if (!error && data?.user) {
-              user = {
-                id: data.user.id,
-                email: 'anonimo@bobadilla.com',
-                role: 'encargado'
-              };
-            }
-          }
-        }
-        
+        // El inicio de sesión anónimo está deshabilitado en el proyecto de
+        // Supabase, por lo que NO intentamos un auto-login anónimo (antes se
+        // intentaba y fallaba en silencio). Si no hay sesión activa, el usuario
+        // debe autenticarse con email/contraseña en la pantalla de Login.
+        const user = await getCurrentSupabaseUser();
+
         setCurrentUser(user);
         
         // Fetch initial pending messages count if authorized
@@ -96,6 +86,18 @@ export default function App() {
 
   // Auto load state from localStorage on mount
   useEffect(() => {
+    // 0. Migración única: consolidar workers duplicados creados por la versión
+    // anterior del sync (un worker con id aleatorio por cada sincronización) y
+    // remapear los worker_id de las entradas hacia el worker canónico.
+    try {
+      const result = runWorkerDedupeMigration();
+      if (result.ran && result.removedWorkers > 0) {
+        console.log(`[Migración] Workers duplicados fusionados: ${result.removedWorkers} (en ${result.groups} nombres), entradas remapeadas: ${result.remappedEntries}`);
+      }
+    } catch (e) {
+      console.warn('Migración de limpieza de workers omitida:', e);
+    }
+
     // 1. Workers
     const storedWorkers = localStorage.getItem('bobadilla_workers');
     if (storedWorkers) {
@@ -116,16 +118,39 @@ export default function App() {
       if (patched) {
         localStorage.setItem('bobadilla_workers', JSON.stringify(parsedWorkers));
       }
+      parsedWorkers.sort((a: any, b: any) => a.name.localeCompare(b.name));
       setWorkers(parsedWorkers);
     } else {
-      setWorkers(DEFAULT_WORKERS);
-      localStorage.setItem('bobadilla_workers', JSON.stringify(DEFAULT_WORKERS));
+      const defaultSorted = [...DEFAULT_WORKERS].sort((a, b) => a.name.localeCompare(b.name));
+      setWorkers(defaultSorted);
+      localStorage.setItem('bobadilla_workers', JSON.stringify(defaultSorted));
     }
 
     // 2. Catalogs
     const storedCatalogs = localStorage.getItem('bobadilla_catalogs');
     if (storedCatalogs) {
       const parsed = JSON.parse(storedCatalogs);
+      
+      // Fix categories if they are strings or old objects (migration)
+      if (parsed.categories && parsed.categories.length > 0) {
+        if (typeof parsed.categories[0] === 'string') {
+          parsed.categories = parsed.categories.map((c: string) => ({
+            name: c,
+            defaultRate: 4500,
+            description: 'Nómina agropecuaria'
+          }));
+          localStorage.setItem('bobadilla_catalogs', JSON.stringify(parsed));
+        } else if (parsed.categories[0].nombre) {
+          // It's the old object format { nombre, precioHora }
+          parsed.categories = parsed.categories.map((c: any) => ({
+            name: c.nombre || 'Sin nombre',
+            defaultRate: c.precioHora || 4500,
+            description: 'Nómina agropecuaria'
+          }));
+          localStorage.setItem('bobadilla_catalogs', JSON.stringify(parsed));
+        }
+      }
+
       if (parsed.species && parsed.species.includes('Quercus Ilex')) {
         setCatalogs(DEFAULT_CATALOGS);
         localStorage.setItem('bobadilla_catalogs', JSON.stringify(DEFAULT_CATALOGS));
@@ -214,7 +239,7 @@ export default function App() {
   // Bidirectional synchronizer trigger when logged-in user changes
   useEffect(() => {
     if (currentUser) {
-      performBidirectionalSync().then((res) => {
+      performBidirectionalSync().then(async (res) => {
         if (!res.success) {
           if (res.message.includes('Versión antigua')) {
             alert(res.message);
@@ -224,33 +249,66 @@ export default function App() {
             setShowAlertModal(true);
           }
         }
-        const syncedEntries = localStorage.getItem('bobadilla_entries');
-        if (syncedEntries) {
-          setEntries(JSON.parse(syncedEntries));
+        const syncedWorkers = localStorage.getItem('bobadilla_workers');
+        if (syncedWorkers) {
+          const parsed = JSON.parse(syncedWorkers);
+          parsed.sort((a: any, b: any) => a.name.localeCompare(b.name));
+          setWorkers(parsed);
         }
+        const syncedCatalogs = localStorage.getItem('bobadilla_catalogs');
+        if (syncedCatalogs) {
+          setCatalogs(JSON.parse(syncedCatalogs));
+        }
+        // CAPA 1: tras subir lo pendiente, mostramos la verdad del servidor.
+        await refreshFromServer();
       }).catch(err => {
         console.log('Startup sync deferred (local mode active):', err);
       });
     }
   }, [currentUser]);
 
+  // CAPA 1 — Fuente de verdad en el servidor.
+  // Lee TODOS los registros directo de Supabase y los muestra, de modo que
+  // todos los roles que ven el 100% (dirección, administración, visor) muestren
+  // exactamente lo mismo, sin depender de la foto vieja del localStorage local.
+  const refreshFromServer = async () => {
+    const res = await fetchServerEntries();
+    if (res.success) {
+      setEntries(res.entries);
+      // El mapeo pudo materializar trabajadores "wsync"/desconocido en localStorage.
+      const syncedWorkers = localStorage.getItem('bobadilla_workers');
+      if (syncedWorkers) {
+        const parsed = JSON.parse(syncedWorkers);
+        parsed.sort((a: any, b: any) => a.name.localeCompare(b.name));
+        setWorkers(parsed);
+      }
+    } else if (res.message) {
+      console.warn('No se pudo leer del servidor (se mantiene la caché local):', res.message);
+    }
+  };
+
   // Sync callbacks
   const handleAddEntries = (newEntriesList: Entry[]) => {
     if (!currentUser) return;
     const stampedList = newEntriesList.map(item => ({
       ...item,
-      created_by: currentUser.id
+      created_by: currentUser.id,
+      // CAPA 2: clave de idempotencia única e irrepetible por parte. Se genera una
+      // sola vez acá (único embudo de alta). La base la usa para reconocer "este
+      // parte ya existe" y actualizarlo en lugar de duplicarlo.
+      client_uuid: item.client_uuid || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`)
     }));
     const updated = [...entries, ...stampedList];
     setEntries(updated);
     localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
 
     // Background sync try
-    performBidirectionalSync().then(res => {
+    performBidirectionalSync().then(async res => {
       if (!res.success) {
         setNotifications(prev => [...prev, `Error sync: ${res.message}`]);
         setShowAlertModal(true);
       }
+      await refreshFromServer();
     }).catch(() => {});
   };
 
@@ -261,11 +319,12 @@ export default function App() {
     localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
 
     // Background sync try
-    performBidirectionalSync().then(res => {
+    performBidirectionalSync().then(async res => {
       if (!res.success) {
         setNotifications(prev => [...prev, `Error sync: ${res.message}`]);
         setShowAlertModal(true);
       }
+      await refreshFromServer();
     }).catch(() => {});
   };
 
@@ -279,17 +338,19 @@ export default function App() {
     localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
 
     // Background sync try
-    performBidirectionalSync().then(res => {
+    performBidirectionalSync().then(async res => {
       if (!res.success) {
         setNotifications(prev => [...prev, `Error sync: ${res.message}`]);
         setShowAlertModal(true);
       }
+      await refreshFromServer();
     }).catch(() => {});
   };
 
   const handleUpdateWorkers = (newWorkers: Worker[]) => {
-    setWorkers(newWorkers);
-    localStorage.setItem('bobadilla_workers', JSON.stringify(newWorkers));
+    const sorted = [...newWorkers].sort((a, b) => a.name.localeCompare(b.name));
+    setWorkers(sorted);
+    localStorage.setItem('bobadilla_workers', JSON.stringify(sorted));
   };
 
   const handleUpdateCatalogs = (newCatalogs: MasterCatalogs) => {
@@ -330,7 +391,7 @@ export default function App() {
     }
     switch (currentView) {
       case 'dashboard':
-        return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} />;
+        return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} currentUserId={currentUser.id} />;
       case 'entries':
         return (
           <Entries 
@@ -340,6 +401,7 @@ export default function App() {
             onUpdateEntry={handleUpdateEntry} 
             onDeleteEntry={handleDeleteEntry} 
             userRole={currentUser.role}
+            currentUserId={currentUser.id}
           />
         );
       case 'add':
@@ -349,16 +411,22 @@ export default function App() {
             catalogs={catalogs} 
             onAddEntries={handleAddEntries} 
             onNavigate={setCurrentView} 
+            userRole={currentUser.role}
           />
         );
       case 'payroll':
-        return <Payroll 
-          entries={entries} 
-          workers={workers} 
-          catalogs={catalogs} 
-          periodoMode={catalogs.periodoMode} 
+        // Liquidaciones: totalmente bloqueado para el encargado (defensa en
+        // profundidad, además de ocultar la pestaña en el menú).
+        if (currentUser.role === 'encargado') {
+          return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} currentUserId={currentUser.id} />;
+        }
+        return <Payroll
+          entries={entries}
+          workers={workers}
+          catalogs={catalogs}
+          periodoMode={catalogs.periodoMode}
           onLockEntries={handleLockEntries}
-          onUpdateMultipleEntries={handleUpdateMultipleEntries} 
+          onUpdateMultipleEntries={handleUpdateMultipleEntries}
           onAddEntries={handleAddEntries}
         />;
       case 'messages':
@@ -370,17 +438,21 @@ export default function App() {
           />
         );
       case 'config':
+        // Configuración: totalmente bloqueada para el encargado.
+        if (currentUser.role === 'encargado') {
+          return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} currentUserId={currentUser.id} />;
+        }
         return (
-          <Config 
-            workers={workers} 
-            catalogs={catalogs} 
-            onUpdateWorkers={handleUpdateWorkers} 
-            onUpdateCatalogs={handleUpdateCatalogs} 
+          <Config
+            workers={workers}
+            catalogs={catalogs}
+            onUpdateWorkers={handleUpdateWorkers}
+            onUpdateCatalogs={handleUpdateCatalogs}
             userRole={currentUser.role}
           />
         );
       default:
-        return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} />;
+        return <Dashboard entries={entries} workers={workers} onNavigate={setCurrentView} userRole={currentUser.role} currentUserId={currentUser.id} />;
     }
   };
 
@@ -444,17 +516,19 @@ export default function App() {
           </button>
 
           {/* Liquidación Tab */}
-          <button
-            onClick={() => { setCurrentView('payroll'); setMobileMenuOpen(false); }}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
-              currentView === 'payroll' 
-                ? 'bg-[#98f994] text-[#0c7521] shadow-sm' 
-                : 'text-[#717a6d] hover:bg-[#e2e2e2]/60 hover:text-[#1a1c1c]'
-            }`}
-          >
-            <CreditCard className="w-4.5 h-4.5" />
-            <span>Liquidación de Haberes</span>
-          </button>
+          {currentUser?.role !== 'encargado' && (
+            <button
+              onClick={() => { setCurrentView('payroll'); setMobileMenuOpen(false); }}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
+                currentView === 'payroll' 
+                  ? 'bg-[#98f994] text-[#0c7521] shadow-sm' 
+                  : 'text-[#717a6d] hover:bg-[#e2e2e2]/60 hover:text-[#1a1c1c]'
+              }`}
+            >
+              <CreditCard className="w-4.5 h-4.5" />
+              <span>Liquidación de Haberes</span>
+            </button>
+          )}
 
           {/* Mensajes WhatsApp Tab */}
           {currentUser?.role !== 'visor' && (
@@ -484,17 +558,19 @@ export default function App() {
           )}
 
           {/* Personal config Tab */}
-          <button
-            onClick={() => { setCurrentView('config'); setMobileMenuOpen(false); }}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
-              currentView === 'config' 
-                ? 'bg-[#98f994] text-[#0c7521] shadow-sm' 
-                : 'text-[#717a6d] hover:bg-[#e2e2e2]/60 hover:text-[#1a1c1c]'
-            }`}
-          >
-            <Settings className="w-4.5 h-4.5" />
-            <span>Configuración General</span>
-          </button>
+          {currentUser?.role !== 'encargado' && (
+            <button
+              onClick={() => { setCurrentView('config'); setMobileMenuOpen(false); }}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
+                currentView === 'config' 
+                  ? 'bg-[#98f994] text-[#0c7521] shadow-sm' 
+                  : 'text-[#717a6d] hover:bg-[#e2e2e2]/60 hover:text-[#1a1c1c]'
+              }`}
+            >
+              <Settings className="w-4.5 h-4.5" />
+              <span>Configuración General</span>
+            </button>
+          )}
 
           {/* Bulk loading launch button */}
           {currentUser?.role !== 'visor' && (
@@ -515,7 +591,7 @@ export default function App() {
             <span className="w-2.5 h-2.5 rounded-full bg-[#006e1c] animate-pulse" />
             <p className="text-[10px] font-bold text-[#717a6d] uppercase tracking-wide">Modo Offline Activo</p>
           </div>
-          <p className="text-[9px] text-[#717a6d] px-2">v2.4.0 • Sincronizado Supabase</p>
+          <p className="text-[9px] text-[#717a6d] px-2">v2.7.1 • Sincronizado Supabase</p>
         </footer>
       </aside>
 
@@ -564,18 +640,42 @@ export default function App() {
                     {currentUser.email.split('@')[0]}
                   </span>
                   <span className="text-[9px] text-[#006e1c] font-black uppercase tracking-wider">
-                    {currentUser.role === 'admin' ? 'Administrador' : currentUser.role === 'encargado' ? 'Encargado' : 'Visor (Solo Lectura)'}
+                    {currentUser.role === 'direccion' ? 'Dirección' : currentUser.role === 'admin' ? 'Administrador' : currentUser.role === 'encargado' ? 'Encargado' : 'Visor (Solo Lectura)'}
                   </span>
                 </div>
                 
-                <button
-                  onClick={handleLogout}
-                  className="p-1 px-2.5 bg-[#ffdad6] hover:bg-[#ffb4ab] text-[#ba1a1a] rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-xs active:scale-95"
-                  title="Cerrar Sesión"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span className="hidden md:inline text-[9px] font-black uppercase tracking-widest leading-none">Cerrar Sesión</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (window.confirm("¿Problemas con la App? Esto limpiará la memoria y descargará la última versión. Se perderán los registros que no hayas sincronizado. ¿Continuar?")) {
+                        const pin = localStorage.getItem('bobadilla_pin');
+                        localStorage.clear();
+                        if (pin) localStorage.setItem('bobadilla_pin', pin);
+                        if ('serviceWorker' in navigator) {
+                          navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                            for (let registration of registrations) {
+                              registration.unregister();
+                            }
+                          });
+                        }
+                        window.location.reload();
+                      }
+                    }}
+                    title="Forzar actualización y limpiar caché"
+                    className="p-1 px-2 bg-[#f3f3f3] hover:bg-[#e2e2e2] text-[#42473e] rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-xs active:scale-95"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span className="hidden sm:inline text-[10px] font-bold">Refrescar</span>
+                  </button>
+
+                  <button
+                    onClick={handleLogout}
+                    className="p-1 px-2.5 bg-[#ffdad6] hover:bg-[#ffb4ab] text-[#ba1a1a] rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-xs active:scale-95"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span className="text-[10px] font-bold hidden sm:inline">Salir</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -665,17 +765,19 @@ export default function App() {
                   </button>
                 )}
 
-                <button
-                  onClick={() => { setCurrentView('payroll'); setMobileMenuOpen(false); }}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'payroll' 
-                      ? 'bg-[#98f994] text-[#0c7521]' 
-                      : 'text-[#717a6d] hover:bg-[#e2e2e2]'
-                  }`}
-                >
-                  <CreditCard className="w-4.5 h-4.5" />
-                  <span>Liquidaciones</span>
-                </button>
+                {currentUser?.role !== 'encargado' && (
+                  <button
+                    onClick={() => { setCurrentView('payroll'); setMobileMenuOpen(false); }}
+                    className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
+                      currentView === 'payroll' 
+                        ? 'bg-[#98f994] text-[#0c7521]' 
+                        : 'text-[#717a6d] hover:bg-[#e2e2e2]'
+                    }`}
+                  >
+                    <CreditCard className="w-4.5 h-4.5" />
+                    <span>Liquidaciones</span>
+                  </button>
+                )}
 
                 {currentUser?.role !== 'visor' && (
                   <button
@@ -702,23 +804,25 @@ export default function App() {
                   </button>
                 )}
 
-                <button
-                  onClick={() => { setCurrentView('config'); setMobileMenuOpen(false); }}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
-                    currentView === 'config' 
-                      ? 'bg-[#98f994] text-[#0c7521]' 
-                      : 'text-[#717a6d] hover:bg-[#e2e2e2]'
-                  }`}
-                >
-                  <Settings className="w-4.5 h-4.5" />
-                  <span>Configuración</span>
-                </button>
+                {currentUser?.role !== 'encargado' && (
+                  <button
+                    onClick={() => { setCurrentView('config'); setMobileMenuOpen(false); }}
+                    className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold transition-all ${
+                      currentView === 'config' 
+                        ? 'bg-[#98f994] text-[#0c7521]' 
+                        : 'text-[#717a6d] hover:bg-[#e2e2e2]'
+                    }`}
+                  >
+                    <Settings className="w-4.5 h-4.5" />
+                    <span>Configuración</span>
+                  </button>
+                )}
               </nav>
             </div>
 
             <footer className="border-t border-[#c0c9bb]/30 pt-4 flex flex-col gap-2 text-[10px] text-[#717a6d]">
               <div>
-                <p className="font-bold">Bobadilla Viveros v2.4.0</p>
+                <p className="font-bold">Bobadilla Viveros v2.7.1</p>
                 <p>Sincronización Supabase CDN</p>
               </div>
               <button

@@ -373,6 +373,7 @@ export const DEFAULT_CATALOGS: MasterCatalogs = {
   "Fertilizacion": [],
   "Arrancada": ["Conteos", "Pintada", "Arrancado", "Seleccion/Clasificacion"],
   "Despacho de plantas": ["Descalzado", "Carga de camion"],
+  "Poda de plantas madres": ["Extraccion material vegetal lenoso", "Extraccion material vegetal yemas"],
   "Administracion": [],
   "Logistica": []
 },

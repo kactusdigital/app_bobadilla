@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Entry, Worker, MasterCatalogs } from '../types';
 import { FileText, Download, Calendar, DollarSign, Users, AlertCircle, Search, Filter, Lock, RefreshCw, X, FileSpreadsheet } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { generateEntryId } from '../supabaseClient';
 
 interface PayrollProps {
   entries: Entry[];
@@ -146,7 +147,10 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       const lastDay = new Date(Number(y), Number(m), 0).getDate().toString().padStart(2, '0');
       return { startStr: `${y}-${m}-01`, endStr: `${y}-${m}-${lastDay}` };
     }
-  }, [selectedPeriod, activeTab, periodoMode]);
+    // IMPORTANTE: customStartDate/customEndDate deben estar en las dependencias.
+    // Sin ellas, al cambiar "Desde/Hasta" en la pestaña Semanal el rango no se
+    // recalculaba y el reporte seguía trayendo la última semana por defecto.
+  }, [selectedPeriod, activeTab, periodoMode, customStartDate, customEndDate]);
 
   const hasPendingBeforeStart = useMemo(() => {
     if (activeTab !== 'weekly' || periodoMode === 'quincenal') return false;
@@ -388,7 +392,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
           .map(r => {
             const diff = Math.abs(r.bruto - r.adelantoEfectivo - r.adelantoTransferencia - r.descuentos);
             return {
-              id: crypto.randomUUID(),
+              id: generateEntryId(),
               worker_id: r.id,
               date: nextDayStr,
               type: 'Adelanto',

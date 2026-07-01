@@ -7,15 +7,23 @@ interface DashboardProps {
   workers: Worker[];
   onNavigate: (view: string) => void;
   userRole?: string;
+  currentUserId?: string;
 }
 
-export default function Dashboard({ entries, workers, onNavigate, userRole }: DashboardProps) {
+export default function Dashboard({ entries, workers, onNavigate, userRole, currentUserId }: DashboardProps) {
   const [timeframe, setTimeframe] = useState<'7days' | 'month'>('7days');
 
   // Helpers for metrics
   const activeEntries = useMemo(() => {
-    return entries.filter(e => !e.deleted);
-  }, [entries]);
+    return entries.filter(e => {
+      if (e.deleted) return false;
+      // El encargado está encapsulado: todas las métricas del Dashboard
+      // (totales, gráfico y últimos registros) se calculan ÚNICAMENTE con los
+      // partes que él mismo cargó, nunca con los totales de la empresa.
+      if (userRole === 'encargado' && e.created_by !== currentUserId) return false;
+      return true;
+    });
+  }, [entries, userRole, currentUserId]);
 
   // Calculations
   const todayStr = useMemo(() => {
@@ -309,7 +317,9 @@ export default function Dashboard({ entries, workers, onNavigate, userRole }: Da
         </section>
       </div>
 
-      {/* Static Informational Banner / Alerts */}
+      {/* Static Informational Banner / Alerts — oculto para el encargado
+          (es actividad administrativa: liquidaciones) */}
+      {userRole !== 'encargado' && (
       <section className="bg-[#1b5e20] text-white p-6 rounded-2xl shadow-sm relative overflow-hidden flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         {/* Subtle decorative circles */}
         <div className="absolute -right-10 -bottom-10 w-44 h-44 rounded-full bg-white/5 pointer-events-none" />
@@ -333,6 +343,7 @@ export default function Dashboard({ entries, workers, onNavigate, userRole }: Da
           Proceder a Liquidaciones <CheckCircle2 className="w-4 h-4" />
         </button>
       </section>
+      )}
     </div>
   );
 }

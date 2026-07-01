@@ -1,16 +1,17 @@
 import React, { useState, useMemo } from 'react';
 import { Worker, Entry, MasterCatalogs } from '../types';
 import { CheckCircle, Save, Loader2, ArrowLeft, Search, Filter, AlertCircle } from 'lucide-react';
-import { v4 as uuidv4 } from 'uuid';
+import { generateEntryId } from '../supabaseClient';
 
 interface AddEntryProps {
   workers: Worker[];
   catalogs: MasterCatalogs;
   onAddEntries: (newEntries: Entry[]) => void;
   onNavigate: (view: string) => void;
+  userRole?: string;
 }
 
-export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }: AddEntryProps) {
+export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate, userRole }: AddEntryProps) {
   // Step Management
   const [step, setStep] = useState<1 | 2>(1);
 
@@ -54,9 +55,9 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }
   }, [workers, filterCategory, filterRegime, searchTerm]);
 
   // Determine field visibility based on Type
-  const isHoursType = ['Trabajos al día', 'Feriado', 'Trabajos Tercerizados'].includes(type);
-  const isDaysType = ['Parte de Enfermo', 'Licencia', 'Vacaciones'].includes(type);
-  const isAdvanceType = ['Adelanto', 'Descuento', 'Bonificación'].includes(type);
+  const isDaysType = ['Licencia', 'Vacaciones', 'Parte de Enfermo'].includes(type);
+  const isAdvanceType = ['Adelanto', 'Descuento', 'Licencia', 'Vacaciones', 'Bonificación', 'Parte de Enfermo'].includes(type);
+  const isHoursType = ['Trabajos al día', 'Feriado', 'Trabajos Tercerizados', 'Registro Administración'].includes(type);
   const isActivityType = ['Trabajos al día', 'Trabajos al tanto', 'Injertación', 'Trabajos Tercerizados'].includes(type);
 
   const handleNextStep = () => {
@@ -109,6 +110,84 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }
   };
 
   const handleSubmit = async () => {
+    // --- GUARDRAILS: Validación estricta ---
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    const limitPast = new Date();
+    limitPast.setDate(today.getDate() - 10);
+    limitPast.setHours(0, 0, 0, 0);
+
+    const inputDate = new Date(date + 'T00:00:00');
+    if (inputDate > today) {
+      alert("Error: No puedes cargar partes con fecha en el futuro.");
+      return;
+    }
+    if (inputDate < limitPast) {
+      alert(`Error: No puedes cargar partes con más de 10 días de antigüedad. La fecha límite es ${limitPast.toLocaleDateString()}`);
+      return;
+    }
+
+    for (const wId of selectedWorkers) {
+      const workerInfo = workers.find(w => w.id === wId);
+      const f = forms[wId];
+      if (!f) continue;
+      const name = workerInfo?.name || "Trabajador desconocido";
+
+      // 1. Validar horas y cantidades
+      const qty = Number(f.quantity || 0);
+      if (isHoursType) {
+        if (qty <= 0) {
+          alert(`Error en carga de ${name}: Las horas cargadas deben ser mayor a 0.`);
+          return;
+        }
+        if (qty > 16) {
+          alert(`Error en carga de ${name}: Las horas cargadas (${qty}) exceden el máximo diario permitido (16 hs).`);
+          return;
+        }
+      } else if (!isAdvanceType) {
+        if (qty <= 0) {
+          alert(`Error en carga de ${name}: La cantidad/días debe ser mayor a 0.`);
+          return;
+        }
+      }
+
+      // 2. Validar Precios / Montos
+      const rate = Number(f.rate || 0);
+      const amt = Number(f.amount || 0);
+      if (isAdvanceType) {
+        if (amt === 0) {
+          alert(`Error en carga de ${name}: El monto del adelanto/descuento/bonificación no puede ser $0.`);
+          return;
+        }
+      } else {
+        if (rate === 0) {
+          alert(`Error en carga de ${name}: El precio unitario ($/hora o $/unidad) no puede ser $0.`);
+          return;
+        }
+      }
+
+      // 3. Validar Actividad Obligatoria
+      if (isActivityType) {
+        if (!f.location) {
+          alert(`Error en carga de ${name}: Debes seleccionar el 'Lugar'.`);
+          return;
+        }
+        if (!f.specie) {
+          alert(`Error en carga de ${name}: Debes seleccionar la 'Especie/Variedad'.`);
+          return;
+        }
+        if (!f.activity) {
+          alert(`Error en carga de ${name}: Debes seleccionar la 'Actividad'.`);
+          return;
+        }
+        if (!f.subtask) {
+          alert(`Error en carga de ${name}: Debes seleccionar el 'Trabajo/Sub-tarea'.`);
+          return;
+        }
+      }
+    }
+    // --- FIN GUARDRAILS ---
+
     setIsSaving(true);
 
     const newEntries: Entry[] = selectedWorkers.map(wId => {
@@ -130,7 +209,7 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }
       }
 
       return {
-        id: String(Date.now() * 10 + Math.floor(Math.random() * 10)),
+        id: generateEntryId(),
         worker_id: wId,
         date,
         type,
@@ -171,6 +250,12 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }
                   type="date"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
+                  max={new Date().toISOString().split('T')[0]}
+                  min={(() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() - 10);
+                    return d.toISOString().split('T')[0];
+                  })()}
                   className="h-12 px-4 rounded-xl border border-[#c0c9bb] bg-[#f9f9f9] text-sm focus:border-[#00450d] outline-none"
                 />
               </div>
@@ -184,14 +269,19 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate }
                   <option value="Trabajos al día">Trabajos al día (hs)</option>
                   <option value="Trabajos al tanto">Trabajos al tanto (unid)</option>
                   <option value="Injertación">Injertación (unid)</option>
-                  <option value="Adelanto">Adelanto (monto)</option>
-                  <option value="Descuento">Descuento (monto)</option>
-                  <option value="Parte de Enfermo">Parte de Enfermo (días)</option>
-                  <option value="Licencia">Licencia (días)</option>
-                  <option value="Vacaciones">Vacaciones (días)</option>
-                  <option value="Bonificación">Bonificación (monto)</option>
-                  <option value="Feriado">Feriado (hs)</option>
                   <option value="Trabajos Tercerizados">Trabajos Tercerizados</option>
+                  {userRole !== 'encargado' && (
+                    <>
+                      <option value="Adelanto">Adelanto (monto)</option>
+                      <option value="Descuento">Descuento (monto)</option>
+                      <option value="Parte de Enfermo">Parte de Enfermo (días)</option>
+                      <option value="Licencia">Licencia (días)</option>
+                      <option value="Vacaciones">Vacaciones (días)</option>
+                      <option value="Bonificación">Bonificación (monto)</option>
+                      <option value="Feriado">Feriado (hs)</option>
+                      <option value="Registro Administración">Registro Administración (hs)</option>
+                    </>
+                  )}
                 </select>
               </div>
             </div>

@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Check, X, Edit, MessageSquare, AlertCircle } from 'lucide-react';
 import { WhatsAppMessage, Entry, Worker, MasterCatalogs } from '../types';
-import { fetchPendingWhatsAppMessages, updateWhatsAppMessageStatus } from '../supabaseClient';
-import { v4 as uuidv4 } from 'uuid';
+import { fetchPendingWhatsAppMessages, updateWhatsAppMessageStatus, generateEntryId } from '../supabaseClient';
 
 interface Props {
   onAddEntries: (entries: Entry[]) => void;
@@ -59,7 +58,7 @@ export function WhatsAppMessages({ onAddEntries, workers, catalogs }: Props) {
     }
 
     return {
-      id: String(Date.now() * 10 + Math.floor(Math.random() * 10)),
+      id: generateEntryId(),
       worker_id: worker.id,
       date: payload.fecha || new Date().toISOString().split('T')[0],
       type: payload.tipo || 'Trabajos al día',

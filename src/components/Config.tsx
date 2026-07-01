@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Worker, MasterCatalogs, formatCurrency } from '../types';
 import { performBidirectionalSync, getCurrentSupabaseUser, registerSupabaseUser, fetchAuditLogs, AuditLogItem } from '../supabaseClient';
-import { Database, Plus, Edit2, Trash2, ShieldCheck, Eye, EyeOff, CheckCircle2, AlertTriangle, Play, RefreshCw, MapPin, Leaf, BookOpen, Clock, Loader2, Coins, History, FileText, Terminal, Download, Upload } from 'lucide-react';
+import { Database, Plus, Edit2, Trash2, ShieldCheck, Eye, EyeOff, CheckCircle2, AlertTriangle, Play, RefreshCw, MapPin, Leaf, BookOpen, Clock, Loader2, Coins, History, FileText, Terminal, Download, Upload, Lock } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 interface ConfigProps {
@@ -39,7 +39,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
   const [workerFormData, setWorkerFormData] = useState({
     name: '',
     category: '',
-    regime: 'temporal' as 'temporal' | 'permanente' | 'mensualizado',
+    regime: 'temporal' as 'temporal' | 'permanente' | 'mensualizado' | 'administracion',
     hourlyRate: 4000,
     fixedSalary: 0,
     isActive: true,
@@ -356,7 +356,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
               className="px-4 py-2 bg-[#f3f3f3] hover:bg-[#e8e8e8] text-[#006e1c] rounded-xl text-xs font-bold flex items-center gap-1.5 border border-[#c0c9bb]/40 transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-              Forzar Sincronización
+              Guardar y Sincronizar
             </button>
             {syncStatus && (
               <p className="text-[10px] text-[#00450d] font-semibold mt-2">{syncStatus}</p>
@@ -366,7 +366,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
 
         {/* Right input forms */}
         <div className="lg:col-span-2 bg-white border border-[#c0c9bb]/50 rounded-2xl p-6 shadow-sm space-y-4">
-          {currentUser?.role === 'admin' ? (
+          {currentUser?.role === 'direccion' ? (
              <div className="space-y-4">
                 <div className="flex items-start justify-between border-b border-[#c0c9bb]/25 pb-2.5">
                   <div>
@@ -452,7 +452,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
               <AlertTriangle className="w-8 h-8 text-[#ba1a1a] mx-auto" />
               <h3 className="text-xs font-bold text-[#ba1a1a] uppercase tracking-wider">Acceso Restringido</h3>
               <p className="text-[11px] text-[#717a6d] leading-relaxed">
-                Solo el usuario con rol de Administrador puede registrar nuevos operadores en el sistema.
+                Solo el usuario con rol de Dirección puede registrar nuevos operadores en el sistema.
               </p>
             </div>
           )}
@@ -471,7 +471,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
               <p className="text-[11px] text-[#717a6d]">Operaciones registradas automáticamente por triggers PostgreSQL en Supabase.</p>
             </div>
           </div>
-          {currentUser?.role === 'admin' && (
+          {currentUser?.role === 'direccion' && (
             <button
               onClick={handleLoadAuditLogs}
               disabled={isAuditLoading}
@@ -483,7 +483,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
           )}
         </div>
 
-        {currentUser?.role === 'admin' ? (
+        {currentUser?.role === 'direccion' ? (
           <div>
             {isAuditLoading && auditLogs.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-8 text-[#717a6d] gap-2">
@@ -585,7 +585,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
               <div>
                 <p className="font-bold text-[#856404]">Vista de Auditoría Restringida por RLS</p>
                 <p className="text-[10px] text-[#717a6d] mt-0.5 font-normal leading-relaxed">
-                  Inicie sesión con un usuario de rol **Administrador** (<code className="bg-amber-100 px-1 py-0.5 rounded font-mono">admin</code>) en el panel superior para descargar el historial de auditoría sincronizado. Las políticas de Row Level Security (RLS) protegen esta información de visualizadores no autorizados.
+                  Inicie sesión con un usuario de rol **Dirección** (<code className="bg-amber-100 px-1 py-0.5 rounded font-mono">direccion</code>) en el panel superior para descargar el historial de auditoría sincronizado. Las políticas de Row Level Security (RLS) protegen esta información de visualizadores no autorizados.
                 </p>
               </div>
             </div>
@@ -650,6 +650,43 @@ CREATE TRIGGER entries_audit
   FOR EACH ROW
   EXECUTE FUNCTION audit_entry_changes();`}
           </div>
+
+          {/* Fix Cache Button */}
+          <div className="bg-[#fff0f0] border border-[#ffcaca] rounded-xl p-4 mt-6">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[#d32f2f]">
+                <AlertTriangle className="w-4 h-4" />
+                <h3 className="text-sm font-bold">Solucionador de Problemas (Limpiar Caché)</h3>
+              </div>
+              <p className="text-xs text-[#5c3a3a] mb-2">
+                Si la aplicación muestra datos desactualizados, se queda congelada, o muestra errores inesperados tras una actualización, usa este botón. 
+                Forzará la eliminación de la memoria interna del navegador y descargará la última versión disponible desde cero.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("¿Estás seguro? Esto borrará la caché local y recargará la aplicación. Si tienes Partes de Trabajo sin sincronizar, se perderán. Asegúrate de haber sincronizado primero.")) {
+                    const pin = localStorage.getItem('bobadilla_pin');
+                    localStorage.clear();
+                    if (pin) localStorage.setItem('bobadilla_pin', pin);
+                    
+                    if ('serviceWorker' in navigator) {
+                      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                        for (let registration of registrations) {
+                          registration.unregister();
+                        }
+                      });
+                    }
+                    window.location.reload();
+                  }
+                }}
+                className="flex items-center justify-center gap-2 bg-[#d32f2f] hover:bg-[#b71c1c] text-white px-4 py-3 rounded-lg text-sm font-bold transition-colors w-full sm:w-auto"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Forzar Actualización y Limpiar Caché
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -703,7 +740,7 @@ CREATE TRIGGER entries_audit
                 <h4 className="font-bold text-base text-[#1a1c1c]">Gestión de Personal</h4>
                 <p className="text-[11px] text-[#717a6d]">Alta, baja y modificación de trabajadores de campo.</p>
               </div>
-               {userRole !== 'visor' && (
+               {(userRole === 'admin' || userRole === 'direccion') && (
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -781,7 +818,7 @@ CREATE TRIGGER entries_audit
                         </td>
                         <td className="px-6 py-3.5 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            {userRole !== 'visor' && (
+                            {(userRole === 'admin' || userRole === 'direccion') && (
                               <button
                                 onClick={() => handleOpenEditWorker(w)}
                                 className="p-1 text-[#006e1c] hover:bg-[#98f994]/40 rounded-lg transition-all"
@@ -790,7 +827,7 @@ CREATE TRIGGER entries_audit
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
                             )}
-                            {userRole === 'admin' && (
+                            {(userRole === 'admin' || userRole === 'direccion') && (
                               <button
                                 onClick={() => handleDeleteWorker(w.id)}
                                 className="p-1 text-[#ba1a1a] hover:bg-[#ffdad6]/50 rounded-lg transition-all"
@@ -817,7 +854,7 @@ CREATE TRIGGER entries_audit
               <h3 className="font-bold text-sm text-[#1a1c1c] uppercase tracking-wider">Tarifas Referenciales</h3>
               <span className="text-[10px] text-[#717a6d]">Convenio Viveristas</span>
             </div>
-            {userRole !== 'visor' && (
+            {userRole === 'direccion' && (
               <button
                 onClick={() => setShowAddCatalogItem({ type: 'category' })}
                 className="bg-[#00450d] hover:bg-[#002203] text-white text-[10px] font-bold py-1.5 px-3 rounded-lg shadow-sm transition-all"
@@ -862,7 +899,7 @@ CREATE TRIGGER entries_audit
                         <p className="text-sm font-bold text-[#00450d]">{formatCurrency(cat.defaultRate)}</p>
                         <p className="text-[9px] font-bold text-[#717a6d]">ARS / hr</p>
                       </div>
-                      {(userRole === 'admin' || userRole === 'encargado') && (
+                      {userRole === 'direccion' && (
                         <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-all">
                           <button
                             onClick={() => {
@@ -933,7 +970,7 @@ CREATE TRIGGER entries_audit
               <h4 className="text-xs font-bold text-[#717a6d] uppercase tracking-wider flex items-center gap-1">
                 <MapPin className="w-4 h-4 text-[#00450d]" /> Ubicaciones (Zonas/Viveros)
               </h4>
-              {userRole !== 'visor' && (
+              {userRole === 'direccion' && (
                 <button
                   onClick={() => setShowAddCatalogItem({ type: 'location' })}
                   className="p-1 px-2.5 bg-[#f3f3f3] hover:bg-[#e8e8e8] text-xs font-semibold rounded-lg text-[#1a1c1c]"
@@ -946,7 +983,7 @@ CREATE TRIGGER entries_audit
               {catalogs.locations.map((loc, i) => (
                 <span key={i} className="relative px-3 py-1.5 bg-[#f9f9f9] border border-[#c0c9bb]/50 rounded-lg text-xs font-medium text-[#1a1c1c] flex items-center gap-1 group pr-6">
                   <MapPin className="w-3 h-3 text-[#717a6d]" /> {loc}
-                  {userRole !== 'visor' && (
+                  {userRole === 'direccion' && (
                     <button
                       onClick={() => {
                         if(confirm(`¿Eliminar ubicación: ${loc}?`)) {
@@ -972,7 +1009,7 @@ CREATE TRIGGER entries_audit
               <h4 className="text-xs font-bold text-[#717a6d] uppercase tracking-wider flex items-center gap-1">
                 <Leaf className="w-4 h-4 text-[#00450d]" /> Especies Cultivadas
               </h4>
-              {userRole !== 'visor' && (
+              {userRole === 'direccion' && (
                 <button
                   onClick={() => setShowAddCatalogItem({ type: 'specie' })}
                   className="p-1 px-2.5 bg-[#f3f3f3] hover:bg-[#e8e8e8] text-xs font-semibold rounded-lg text-[#1a1c1c]"
@@ -985,7 +1022,7 @@ CREATE TRIGGER entries_audit
               {catalogs.species.map((sp, i) => (
                 <span key={i} className="relative px-3 py-1.5 bg-[#f9f9f9] border border-[#c0c9bb]/50 rounded-lg text-xs font-medium text-[#1a1c1c] flex items-center gap-1 group pr-6">
                   <Leaf className="w-3 h-3 text-[#717a6d]" /> {sp}
-                  {userRole !== 'visor' && (
+                  {userRole === 'direccion' && (
                     <button
                       onClick={() => {
                         if(confirm(`¿Eliminar especie: ${sp}?`)) {

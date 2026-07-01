@@ -2,6 +2,47 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Entry, DeletedEntry, Worker, MasterCatalogs, WhatsAppMessage } from './types';
 import { checkAppVersion } from './versionCheck';
 
+// ID estable y único para el placeholder de registros huérfanos (sin trabajador asignable)
+export const UNKNOWN_WORKER_ID = 'w_desconocido';
+
+/**
+ * Genera un ID numérico único para las entradas (entries_v4).
+ *
+ * IMPORTANTE: la columna `id` de `entries_v4` en Supabase es NUMÉRICA (bigint),
+ * por lo que NO podemos usar UUIDs de texto (romperían el upsert y la columna).
+ * El esquema anterior (`Date.now() * 10 + random(0..9)`) sólo tenía 10 valores
+ * para diferenciar registros creados en el mismo milisegundo, así que al cargar
+ * varios trabajadores de golpe colisionaban y se sobrescribían en Supabase
+ * (causa real del "15 registros que se vuelven 14").
+ *
+ * Esta versión usa un reloj monotónico por dispositivo. El ID es
+ * `base * 100 + slot`, donde `base` arranca en Date.now() (13 dígitos) y
+ * `slot` (0..99) diferencia registros creados en el mismo milisegundo. Si una
+ * carga masiva agota los 100 slots de un milisegundo, `base` avanza al
+ * "siguiente milisegundo virtual", de modo que NUNCA se repite un ID por más
+ * registros que se carguen de golpe. El resultado tiene 15 dígitos (muy por
+ * debajo de Number.MAX_SAFE_INTEGER y del límite de 15 dígitos que valida la
+ * sincronización). El slot se siembra con un valor aleatorio por sesión para
+ * reducir además colisiones entre dispositivos distintos.
+ */
+let __idBase = 0;
+let __idSlot = Math.floor(Math.random() * 100);
+export function generateEntryId(): string {
+  const now = Date.now();
+  if (now > __idBase) {
+    __idBase = now;
+  } else {
+    // Mismo milisegundo (o reloj estancado): consumimos el siguiente slot.
+    __idSlot++;
+    if (__idSlot > 99) {
+      // Se agotaron los slots: avanzamos a un milisegundo virtual.
+      __idBase++;
+      __idSlot = 0;
+    }
+  }
+  return String(__idBase * 100 + __idSlot);
+}
+
 // Storage Keys
 const CREDENTIALS_KEY = 'bobadilla_supabase_creds';
 const ENTRIES_KEY = 'bobadilla_entries';
@@ -63,6 +104,44 @@ export interface SupabaseUser {
   role: string;
 }
 
+// Mapeo de rol por email (compatibilidad / fallback cuando aún no existe la
+// tabla profiles de la Fase 2, o no hay fila para el usuario).
+function roleFromEmailFallback(email?: string, metadataRole?: any): string {
+  const e = (email || '').toLowerCase();
+  if (['fernandowebs@gmail.com', 'belen@bobadillaviveros.com', 'carlos@bobadillaviveros.com'].includes(e)) {
+    return 'direccion';
+  }
+  if (e === 'administracion@bobadillaviveros.com') {
+    return 'admin';
+  }
+  if (['encargadogeneral@bobadillaviveros.com', 'encargadofinca@bobadillaviveros.com'].includes(e)) {
+    return 'encargado';
+  }
+  return String(metadataRole || 'visor');
+}
+
+/**
+ * Resuelve el rol del usuario. Fuente de verdad: la tabla `profiles` (Fase 2).
+ * Si la tabla todavía no existe o no hay fila para el usuario, cae al mapeo por
+ * email, de modo que el código funcione tanto antes como después de aplicar la
+ * migración de roles en la base de datos.
+ */
+async function resolveUserRole(client: SupabaseClient, user: any): Promise<string> {
+  try {
+    const { data, error } = await client
+      .from('profiles')
+      .select('role')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (!error && data?.role) {
+      return String(data.role);
+    }
+  } catch (e) {
+    // Tabla inexistente u otro error -> usamos el fallback por email.
+  }
+  return roleFromEmailFallback(user.email, user.user_metadata?.role || (user as any).raw_user_meta_data?.role);
+}
+
 export async function getCurrentSupabaseUser(): Promise<SupabaseUser | null> {
   const client = createSupabaseInstance();
   if (!client) return null;
@@ -72,7 +151,7 @@ export async function getCurrentSupabaseUser(): Promise<SupabaseUser | null> {
     return {
       id: user.id,
       email: user.email,
-      role: String(user.user_metadata?.role || (user as any).raw_user_meta_data?.role || 'visor')
+      role: await resolveUserRole(client, user)
     };
   } catch (e) {
     return null;
@@ -94,7 +173,7 @@ export async function loginSupabaseUser(email: string, password: string): Promis
       user: {
         id: user.id,
         email: user.email,
-        role: String(user.user_metadata?.role || (user as any).raw_user_meta_data?.role || 'visor')
+        role: await resolveUserRole(client, user)
       }
     };
   } catch (e: any) {
@@ -102,7 +181,7 @@ export async function loginSupabaseUser(email: string, password: string): Promis
   }
 }
 
-export async function registerSupabaseUser(email: string, password: string, role: 'admin' | 'encargado' | 'visor'): Promise<{ success: boolean; message: string }> {
+export async function registerSupabaseUser(email: string, password: string, role: 'direccion' | 'admin' | 'encargado' | 'visor'): Promise<{ success: boolean; message: string }> {
   const client = createSupabaseInstance();
   if (!client) return { success: false, message: 'Supabase no está configurado.' };
   try {
@@ -209,6 +288,210 @@ export async function testSupabaseConnection(url: string, anonKey: string): Prom
 }
 
 /**
+ * Convierte una fila cruda de `entries_v4` (Supabase) al modelo local `Entry`.
+ *
+ * Centraliza el parseo (horas/cantidad/rate, JSON embebido en `descripcion`) y la
+ * resolución a prueba de fallos del `worker_id`: si el trabajador no existe
+ * localmente, lo crea con un id estable derivado del nombre (o cae al placeholder
+ * "Trabajador Desconocido"), de modo que ningún registro quede huérfano ni se
+ * dupliquen trabajadores en sincronizaciones sucesivas. Puede mutar `localWorkers`
+ * (y persistirlo) cuando hace falta materializar un trabajador.
+ *
+ * IMPORTANTE: copia `created_by` desde el servidor. Antes el mapeo lo omitía, de
+ * modo que al bajar registros se perdía el autor y el filtro del rol "encargado"
+ * (que sólo ve lo suyo) ocultaba todo lo descargado.
+ */
+function mapServerRowToEntry(s: any, localWorkers: Worker[]): Entry {
+  let hours = 0;
+  let quantity = 0;
+  let rate = Number(s.precio_unitario || 0);
+  let worker_id = '';
+  let paymentMethod = s.forma_pago || '';
+  let notes = s.descripcion || '';
+  let subtask = s.trabajo || '';
+
+  try {
+    if (s.descripcion && s.descripcion.startsWith('{')) {
+      const parsedDesc = JSON.parse(s.descripcion);
+      hours = typeof parsedDesc.hours === 'number' ? parsedDesc.hours : 0;
+      quantity = typeof parsedDesc.quantity === 'number' ? parsedDesc.quantity : 0;
+      rate = typeof parsedDesc.rate === 'number' ? parsedDesc.rate : Number(s.precio_unitario || 0);
+      worker_id = parsedDesc.worker_id || '';
+      notes = '';
+    } else {
+      if (s.unidad === 'hs' || s.unidad === 'horas') {
+        hours = Number(s.cantidad || 0);
+      } else {
+        quantity = Number(s.cantidad || 0);
+      }
+    }
+  } catch (e) {
+    if (s.unidad === 'hs' || s.unidad === 'horas') {
+      hours = Number(s.cantidad || 0);
+    } else {
+      quantity = Number(s.cantidad || 0);
+    }
+  }
+
+  if (!worker_id) {
+    const cleanName = (s.nombre || '').toLowerCase().trim();
+    if (cleanName) {
+      const matchedWorker = localWorkers.find(w => w.name.toLowerCase().trim() === cleanName);
+      if (matchedWorker) {
+        worker_id = matchedWorker.id;
+      } else {
+        const stableId = 'wsync_' + cleanName.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        let synced = localWorkers.find(w => w.id === stableId);
+        if (!synced) {
+          synced = {
+            id: stableId,
+            name: s.nombre,
+            category: s.categoria || 'Peon General',
+            regime: (s.regimen as any) || 'temporal',
+            hourlyRate: Number(s.precio_unitario || 0),
+            isActive: true,
+            legajo: 'SYNC'
+          };
+          localWorkers.push(synced);
+          localStorage.setItem(WORKERS_KEY, JSON.stringify(localWorkers));
+          localStorage.setItem('bobadilla_config_timestamp', String(Date.now()));
+        }
+        worker_id = stableId;
+      }
+    } else {
+      let generic = localWorkers.find(w => w.id === UNKNOWN_WORKER_ID);
+      if (!generic) {
+        generic = {
+          id: UNKNOWN_WORKER_ID,
+          name: 'Trabajador Desconocido',
+          category: 'Sin categoría',
+          regime: 'temporal',
+          hourlyRate: 0,
+          isActive: false,
+          legajo: 'SIN-ASIGNAR'
+        };
+        localWorkers.push(generic);
+        localStorage.setItem(WORKERS_KEY, JSON.stringify(localWorkers));
+        localStorage.setItem('bobadilla_config_timestamp', String(Date.now()));
+      }
+      worker_id = UNKNOWN_WORKER_ID;
+    }
+  }
+
+  return {
+    id: String(s.id),
+    worker_id: worker_id || UNKNOWN_WORKER_ID,
+    date: s.fecha,
+    type: s.tipo,
+    location: s.lugar || '',
+    quadro: s.cuadro || '',
+    specie: s.especie || '',
+    activity: s.actividad_principal || '',
+    subtask: subtask,
+    notes: notes,
+    paymentMethod: paymentMethod,
+    hours: hours,
+    quantity: quantity,
+    amount: Number(s.total || 0),
+    rate: rate,
+    locked: s.locked === true,
+    updated_at: s.created_at,
+    created_by: s.created_by || undefined,
+    // CAPA 2: conservamos la clave de idempotencia que viene del servidor para que
+    // el registro local mantenga su identidad estable en futuras sincronizaciones.
+    client_uuid: s.client_uuid || undefined
+  };
+}
+
+/**
+ * CAPA 1 — Fuente de verdad en el servidor.
+ *
+ * Trae TODOS los registros activos directamente de `entries_v4` (paginando, porque
+ * el REST de Supabase devuelve máximo 1000 filas por petición), descarta los que
+ * figuran en `deleted_entries_v4`, y los mapea al modelo local. De este modo todos
+ * los roles que ven el 100% (dirección, administración, visor) muestran exactamente
+ * lo mismo, sin depender de la foto vieja del `localStorage` de cada dispositivo.
+ *
+ * Para no perder trabajo cargado sin conexión, conserva además los registros
+ * locales "pendientes" (los que todavía no existen en el servidor). El resultado se
+ * cachea en `localStorage` para el modo offline.
+ */
+export async function fetchServerEntries(): Promise<{ success: boolean; entries: Entry[]; message?: string }> {
+  const client = createSupabaseInstance();
+  if (!client) return { success: false, entries: [], message: 'Supabase no está configurado.' };
+
+  try {
+    // 1. IDs borrados (tombstones) para no mostrarlos.
+    const { data: serverDeleted } = await client
+      .from('deleted_entries_v4')
+      .select('entry_id');
+    const deletedIds = new Set((serverDeleted || []).map((d: any) => String(d.entry_id)));
+
+    // 2. Trabajadores locales para resolver nombres -> worker_id.
+    const localWorkers: Worker[] = JSON.parse(localStorage.getItem(WORKERS_KEY) || '[]');
+
+    // 3. Descargar TODAS las filas paginando (1000 por página).
+    const PAGE = 1000;
+    let from = 0;
+    const rawRows: any[] = [];
+    while (true) {
+      const { data, error } = await client
+        .from('entries_v4')
+        .select('*')
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) {
+        return { success: false, entries: [], message: error.message };
+      }
+      if (!data || data.length === 0) break;
+      rawRows.push(...data);
+      if (data.length < PAGE) break;
+      from += PAGE;
+    }
+
+    // 4. Mapear (excluyendo borrados).
+    const serverEntries: Entry[] = [];
+    const serverIds = new Set<string>();
+    // CAPA 2: índice de client_uuid ya presentes en el servidor. Al subir un parte,
+    // el servidor lo reconoce por client_uuid y le asigna SU propio id numérico,
+    // distinto del id temporal local. Si comparásemos solo por id, la copia local
+    // quedaría como "pendiente" para siempre y se sumaría como un fantasma duplicado
+    // (inflando totales como "Costo Neto de Plantilla"). Por eso también indexamos
+    // el client_uuid para descartar esos duplicados ya sincronizados.
+    const serverClientUuids = new Set<string>();
+    for (const s of rawRows) {
+      const idStr = String(s.id);
+      if (deletedIds.has(idStr)) continue;
+      serverIds.add(idStr);
+      if (s.client_uuid) serverClientUuids.add(String(s.client_uuid));
+      serverEntries.push(mapServerRowToEntry(s, localWorkers));
+    }
+
+    // 5. Conservar registros locales pendientes (offline, aún no subidos).
+    //    Un local es "pendiente" solo si NO coincide por id NI por client_uuid con
+    //    ninguna fila del servidor: así un parte ya subido (con id remoto nuevo) deja
+    //    de arrastrar su gemelo local.
+    const localEntries: Entry[] = JSON.parse(localStorage.getItem(ENTRIES_KEY) || '[]');
+    const pendingLocal = localEntries.filter(e =>
+      !e.deleted &&
+      !(e.client_uuid && serverClientUuids.has(String(e.client_uuid))) &&
+      !serverIds.has(String(e.id).replace(/\D/g, '')) &&
+      !serverIds.has(String(e.id)) &&
+      !deletedIds.has(String(e.id).replace(/\D/g, ''))
+    );
+
+    const merged = [...serverEntries, ...pendingLocal];
+
+    // 6. Cachear para offline.
+    localStorage.setItem(ENTRIES_KEY, JSON.stringify(merged));
+
+    return { success: true, entries: merged };
+  } catch (e: any) {
+    return { success: false, entries: [], message: e?.message || 'Error al leer registros del servidor.' };
+  }
+}
+
+/**
  * Sync logic: Bidirectional (v4 Tables)
  * 1. Upload local unsynced or updated entries using entries_v4.
  * 2. Delete entries in Supabase entries_v4 that are soft-deleted locally, insert to 'deleted_entries_v4' table, and hard-delete locally.
@@ -297,7 +580,14 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
       if (serverMainTimestamp > localConfigTimestamp && serverMainData) {
         // Download server configuration
         const loadedWorkers = serverMainData.workers || [];
-        const loadedCategories = serverMainData.categorias || [];
+        let loadedCategories = serverMainData.categorias || [];
+        if (loadedCategories.length > 0) {
+          if (typeof loadedCategories[0] === 'string') {
+            loadedCategories = loadedCategories.map((c: string) => ({ name: c, defaultRate: 4500, description: 'Nómina agropecuaria' }));
+          } else if (loadedCategories[0].nombre) {
+            loadedCategories = loadedCategories.map((c: any) => ({ name: c.nombre || 'Sin nombre', defaultRate: c.precioHora || 4500, description: 'Nómina agropecuaria' }));
+          }
+        }
         const loadedLocations = serverMainData.lugares || [];
         const loadedSpecies = serverMainData.especies || [];
         let loadedActivities = localCatalogs?.activities || [];
@@ -362,10 +652,10 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
         
         if (deletionError) {
           console.warn('Failed to delete on server:', deletionError.message);
-          if (deletionError.message.includes('row-level security') || deletionError.message.includes('permission denied') || deletionError.message.includes('violates row-level security')) {
-            throw new Error(`Permisos insuficientes para eliminar el registro #${numericId}. Se requiere el rol de Administrador ('admin') según las políticas RLS activas.`);
-          }
-          throw new Error(`Error del servidor al eliminar: ${deletionError.message}`);
+          // Si hay error de RLS, simplemente lo ignoramos y no detenemos toda la sincronización.
+          // Restauramos el estado local para que no siga intentando infinitamente y bloqueando la vista
+          entry.deleted = false;
+          continue;
         }
 
         // Log in server-side deleted_entries_v4 table so other devices delete it
@@ -375,9 +665,7 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
         });
 
         if (delEntryError) {
-          if (delEntryError.message.includes('row-level security') || delEntryError.message.includes('permission denied')) {
-            throw new Error(`Sincronización rechazada por políticas RLS. Asegúrese de estar autenticado con rol habilitado.`);
-          }
+          console.warn('Failed to log deletion:', delEntryError.message);
         }
         
         // Audit log for deletion is automatically handled by the database trigger
@@ -429,8 +717,8 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
     for (const entry of localEntries) {
       let numericId = Number(entry.id.replace(/\D/g, ''));
       if (isNaN(numericId) || numericId === 0 || String(numericId).length > 15) {
-        numericId = Date.now() * 10 + Math.floor(Math.random() * 10);
-        entry.id = String(numericId);
+        entry.id = generateEntryId();
+        numericId = Number(entry.id);
       }
       
       const s = serverMap.get(String(numericId));
@@ -473,8 +761,13 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
           unidad: entry.hours > 0 ? 'hs' : 'unid',
           precio_unitario: Number(entry.rate || 0),
           total: Number(entry.amount || 0),
+          locked: entry.locked ? true : false,
           created_at: entry.updated_at || new Date().toISOString(),
-          created_by: entry.created_by || currentUserObj.id
+          created_by: entry.created_by || currentUserObj.id,
+          // CAPA 2: clave de idempotencia. Para registros viejos sin uuid usamos
+          // `legacy-<id>`, EXACTAMENTE el mismo valor que el backfill SQL, de modo
+          // que el servidor los reconozca y nunca los duplique al re-sincronizar.
+          client_uuid: entry.client_uuid || ('legacy-' + numericId)
         };
         payloadsToUpload.push(payload);
       }
@@ -484,31 +777,38 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
     
     localEntries = updatedLocalEntries;
 
-    // Deduplicate payloadsToUpload to prevent ON CONFLICT DO UPDATE error
+    // Deduplicate payloadsToUpload to prevent ON CONFLICT DO UPDATE error.
+    // CAPA 2: deduplicamos por la clave de idempotencia (client_uuid), que es el
+    // mismo destino de conflicto del upsert. Así dos cargas del MISMO parte se
+    // colapsan en una, pero una colisión real de `id` numérico entre partes
+    // DISTINTOS ya no se descarta en silencio (saldría error visible).
     const uniquePayloadsMap = new Map();
     for (const p of payloadsToUpload) {
-      // If a duplicate ID is found, the later one in the array (most recent iteration) wins
-      uniquePayloadsMap.set(p.id, p);
+      uniquePayloadsMap.set(p.client_uuid, p);
     }
     const uniquePayloads = Array.from(uniquePayloadsMap.values());
 
     // ----------------------------------------
     // 7. Bulk Upsert
     // ----------------------------------------
+    let upsertError = null;
     if (uniquePayloads.length > 0) {
       const CHUNK_SIZE = 500;
       for (let i = 0; i < uniquePayloads.length; i += CHUNK_SIZE) {
         const chunk = uniquePayloads.slice(i, i + CHUNK_SIZE);
-        const { error } = await client.from('entries_v4').upsert(chunk);
+        // CAPA 2: el conflicto se resuelve por client_uuid (no por id). Si el mismo
+        // parte ya existe (mismo uuid), se ACTUALIZA esa fila en vez de crear otra,
+        // aunque su id numérico haya cambiado. Requiere el índice único de la migración.
+        const { error } = await client.from('entries_v4').upsert(chunk, { onConflict: 'client_uuid' });
         if (error) {
           console.error('Error in bulk upsert:', error);
-          if (error.message.includes('row-level security') || error.message.includes('permission denied') || error.message.includes('violates row-level security')) {
-            throw new Error('Sincronización rechazada por políticas RLS. Inicie sesión con un usuario habilitado.');
-          }
-          throw new Error(`Error de subida masiva: ${error.message}`);
+          upsertError = error;
+          // No hacemos throw aquí para permitir que la descarga (merge) ocurra
+          break; // Salimos del loop de upsert, pero continuamos con la función
         }
         uploadedCount += chunk.length;
       }
+      // Se removió el throw de upsertError de aquí para ponerlo al final
     }
 
     // ----------------------------------------
@@ -523,77 +823,9 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
         const serverUpdatedAt = s.created_at ? new Date(s.created_at).getTime() : 0;
         const localUpdatedAt = local?.updated_at ? new Date(local.updated_at).getTime() : 0;
 
-        let hours = 0;
-        let quantity = 0;
-        let rate = Number(s.precio_unitario || 0);
-        let worker_id = '';
-        let paymentMethod = s.forma_pago || '';
-        let notes = s.descripcion || '';
-        let subtask = s.trabajo || '';
-
-        try {
-          if (s.descripcion && s.descripcion.startsWith('{')) {
-            const parsedDesc = JSON.parse(s.descripcion);
-            hours = typeof parsedDesc.hours === 'number' ? parsedDesc.hours : 0;
-            quantity = typeof parsedDesc.quantity === 'number' ? parsedDesc.quantity : 0;
-            rate = typeof parsedDesc.rate === 'number' ? parsedDesc.rate : Number(s.precio_unitario || 0);
-            worker_id = parsedDesc.worker_id || '';
-            notes = ''; 
-          } else {
-            if (s.unidad === 'hs' || s.unidad === 'horas') {
-              hours = Number(s.cantidad || 0);
-            } else {
-              quantity = Number(s.cantidad || 0);
-            }
-          }
-        } catch (e) {
-          if (s.unidad === 'hs' || s.unidad === 'horas') {
-            hours = Number(s.cantidad || 0);
-          } else {
-            quantity = Number(s.cantidad || 0);
-          }
-        }
-
-        if (!worker_id && s.nombre) {
-          const matchedWorker = localWorkers.find(w => w.name.toLowerCase().trim() === s.nombre.toLowerCase().trim());
-          if (matchedWorker) {
-            worker_id = matchedWorker.id;
-          } else {
-            const newWorkerId = 'w_' + Math.random().toString(36).substring(2, 9);
-            const newWorker: Worker = {
-              id: newWorkerId,
-              name: s.nombre,
-              category: s.categoria || 'Peon General',
-              regime: (s.regimen as any) || 'temporal',
-              hourlyRate: Number(s.precio_unitario || 12),
-              isActive: true,
-              legajo: '#GEN' + Math.floor(Math.random() * 1000)
-            };
-            localWorkers.push(newWorker);
-            worker_id = newWorkerId;
-            localStorage.setItem(WORKERS_KEY, JSON.stringify(localWorkers));
-            localStorage.setItem('bobadilla_config_timestamp', String(Date.now()));
-          }
-        }
-
-        const parsedEntry: Entry = {
-          id: sIdStr,
-          worker_id: worker_id || 'w1',
-          date: s.fecha,
-          type: s.tipo,
-          location: s.lugar || '',
-          quadro: s.cuadro || '',
-          specie: s.especie || '',
-          activity: s.actividad_principal || '',
-          subtask: subtask,
-          notes: notes,
-          paymentMethod: paymentMethod,
-          hours: hours,
-          quantity: quantity,
-          amount: Number(s.total || 0),
-          rate: rate,
-          updated_at: s.created_at
-        };
+        // Mapeo centralizado (parseo + resolución a prueba de fallos del worker_id
+        // + preservación de created_by). Ver mapServerRowToEntry.
+        const parsedEntry: Entry = mapServerRowToEntry(s, localWorkers);
 
         if (!local) {
           localEntries.push(parsedEntry);
@@ -612,6 +844,17 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
     localStorage.setItem(ENTRIES_KEY, JSON.stringify(localEntries));
 
     localStorage.setItem(LAST_SYNC_KEY, new Date().toLocaleString());
+
+    if (upsertError) {
+      return {
+        success: false,
+        uploaded: uploadedCount,
+        downloaded: downloadedCount,
+        deleted: deletedCount,
+        configSynced,
+        message: `Sincronización parcial: Se descargaron ${downloadedCount} registros, pero falló la subida: ${upsertError.message}`
+      };
+    }
 
     return {
       success: true,

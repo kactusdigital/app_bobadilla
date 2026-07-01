@@ -16,7 +16,7 @@ export interface Entry {
   id: string;
   worker_id: string;
   date: string; // YYYY-MM-DD
-  type: string; // "Trabajos al día", "Trabajos al tanto", "Injertación", "Adelanto", "Descuento", "Feriado", "Licencia", "Vacaciones", "Bonificación"
+  type: string; // "Trabajos al día", "Trabajos al tanto", "Injertación", "Adelanto", "Descuento", "Feriado", "Licencia", "Vacaciones", "Bonificación", "Registro Administración"
   location: string;
   quadro: string;
   specie: string;
@@ -32,6 +32,7 @@ export interface Entry {
   locked?: boolean; // lock tracker for finalized payrolls
   updated_at?: string; // ISO string
   created_by?: string; // ID of the user who created it
+  client_uuid?: string; // CAPA 2: clave de idempotencia única generada al crear el parte (evita duplicados/pérdidas por colisión o re-subida)
 }
 
 export interface DeletedEntry {

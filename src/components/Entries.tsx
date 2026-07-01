@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { Entry, Worker, MasterCatalogs, formatCurrency } from '../types';
-import { Search, Filter, Trash2, Edit2, ChevronLeft, ChevronRight, CheckCircle, Info, Calendar, MoreHorizontal, X, FileEdit, Lock, Download } from 'lucide-react';
+import { Search, Filter, Trash2, Edit2, ChevronLeft, ChevronRight, CheckCircle, Info, Calendar, MoreHorizontal, X, FileEdit, Lock, Download, RefreshCw } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { performBidirectionalSync } from '../supabaseClient';
 
 interface EntriesProps {
   entries: Entry[];
@@ -10,9 +11,10 @@ interface EntriesProps {
   onUpdateEntry: (id: string, updated: Partial<Entry>) => void;
   onDeleteEntry: (id: string) => void;
   userRole?: string;
+  currentUserId?: string;
 }
 
-export default function Entries({ entries, workers, catalogs, onUpdateEntry, onDeleteEntry, userRole }: EntriesProps) {
+export default function Entries({ entries, workers, catalogs, onUpdateEntry, onDeleteEntry, userRole, currentUserId }: EntriesProps) {
   // Filter States
   const [searchTerm, setSearchTerm] = useState('');
   const [filterPeriod, setFilterPeriod] = useState('Este mes');
@@ -22,6 +24,22 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
   const [filterType, setFilterType] = useState('Todos');
   const [filterFormaPago, setFilterFormaPago] = useState('Todos');
   const [filterRegime, setFilterRegime] = useState('Todos');
+  const [filterCategory, setFilterCategory] = useState('Todas');
+  
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleTriggerSync = async () => {
+    setIsSyncing(true);
+    const result = await performBidirectionalSync();
+    setIsSyncing(false);
+    if (result.success) {
+      alert(`¡Sincronización exitosa!\nSubidos: ${result.uploaded}\nDescargados: ${result.downloaded}`);
+      window.location.reload();
+    } else {
+      alert(`Mensaje de sincronización: ${result.message}`);
+      window.location.reload();
+    }
+  };
 
   // Edit Modal State
   const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
@@ -55,6 +73,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       setFilterType('Todos');
       setFilterFormaPago('Todos');
       setFilterRegime('Todos');
+      setFilterCategory('Todas');
       setCurrentPage(1);
     }
   };
@@ -63,6 +82,14 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
   const filteredEntries = useMemo(() => {
     return entries.filter(e => {
       if (e.deleted) return false;
+
+      // ROLES: SÓLO el rol 'encargado' (empleado de campo) tiene visibilidad
+      // restringida a sus propios registros. Dirección, administración y visor
+      // ven SIEMPRE el 100% de los registros. Cualquier otro rol no reconocido
+      // NO se restringe: jamás ocultamos datos por un rol ambiguo.
+      if (userRole === 'encargado' && e.created_by !== currentUserId) {
+        return false;
+      }
 
       // 1. Text Search on Location, activity, or worker initials
       if (searchTerm) {
@@ -82,16 +109,24 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
         return false;
       }
 
+      // NUNCA ocultamos un registro porque no se encuentre su trabajador.
+      // Si el worker no existe localmente (fallo de sincronización), el registro
+      // igual se muestra en la tabla con una etiqueta roja de advertencia.
       const worker = workers.find(w => w.id === e.worker_id);
-      if (!worker) return false;
 
       // 3. Filter by Type
       if (filterType !== 'Todos' && e.type !== filterType) {
         return false;
       }
 
-      // 3.5 Filter by Regime
-      if (filterRegime !== 'Todos' && worker.regime !== filterRegime) {
+      // 3.5 Filter by Regime (sólo descarta si hay un filtro específico activo;
+      // los registros con trabajador desconocido permanecen visibles por defecto)
+      if (filterRegime !== 'Todos' && worker?.regime !== filterRegime) {
+        return false;
+      }
+
+      // 3.8 Filter by Category (mismo criterio que el régimen)
+      if (filterCategory !== 'Todas' && worker?.category !== filterCategory) {
         return false;
       }
 
@@ -182,13 +217,12 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
     e.preventDefault();
     if (!editingEntry) return;
 
-    const isAdvanceType = ['Adelanto', 'Descuento', 'Bonificación'].includes(editFormData.type);
     const isNegative = ['Adelanto', 'Descuento'].includes(editFormData.type);
-
+    const isAdvanceType = ['Adelanto', 'Descuento', 'Licencia', 'Vacaciones', 'Bonificación', 'Parte de Enfermo'].includes(editFormData.type);
     let calculatedAmount = Number(editFormData.amount);
 
     if (!isAdvanceType) {
-       const isHoursType = ['Trabajos al día', 'Feriado', 'Trabajos Tercerizados'].includes(editFormData.type);
+       const isHoursType = ['Trabajos al día', 'Feriado', 'Trabajos Tercerizados', 'Registro Administración'].includes(editFormData.type);
        const qty = isHoursType ? Number(editFormData.hours) : Number(editFormData.quantity);
        calculatedAmount = qty * Number(editFormData.rate);
     } else {
@@ -218,12 +252,12 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
 
   const getWorkerInfo = (workerId: string) => {
     const worker = workers.find(w => w.id === workerId);
-    if (!worker) return { name: 'Desconocido', category: 'General', initials: '??' };
+    if (!worker) return { name: 'Trabajador Desconocido', category: 'Falla de Sincronización', initials: '!', isUnknown: true };
     const parts = worker.name.split(' ');
-    const initials = parts.length >= 2 
-      ? (parts[0][0] + parts[1][0]).toUpperCase() 
+    const initials = parts.length >= 2
+      ? (parts[0][0] + parts[1][0]).toUpperCase()
       : parts[0].substring(0, 2).toUpperCase();
-    return { name: worker.name, category: worker.category, initials };
+    return { name: worker.name, category: worker.category, initials, isUnknown: false };
   };
 
   const handleDeleteClick = (entry: Entry) => {
@@ -292,6 +326,13 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-[#717a6d]" />
           </div>
           <button 
+            onClick={handleTriggerSync} 
+            disabled={isSyncing}
+            className="flex py-2 px-4 rounded-full border border-[#00450d] text-[#00450d] bg-white text-xs font-bold items-center gap-1.5 hover:bg-[#f3f3f3] transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} /> {isSyncing ? 'Sincronizando...' : 'Guardar y Sincronizar'}
+          </button>
+          <button 
             onClick={handleExportFiltered} 
             className="flex py-2 px-4 rounded-full border border-[#00450d] text-[#00450d] bg-[#98f994]/20 text-xs font-bold items-center gap-1.5 hover:bg-[#98f994]/40 transition-colors"
           >
@@ -340,7 +381,11 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
             <input
               type="date"
               value={filterDateFrom}
-              onChange={(e) => { setFilterDateFrom(e.target.value); setCurrentPage(1); }}
+              onChange={(e) => { 
+                setFilterDateFrom(e.target.value); 
+                if (e.target.value) setFilterPeriod('Todos');
+                setCurrentPage(1); 
+              }}
               className="text-xs border border-[#c0c9bb] bg-[#f9f9f9] rounded-lg p-2 focus:border-[#00450d] focus:ring-0 text-[#1a1c1c] outline-none h-10"
             />
           </div>
@@ -351,7 +396,11 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
             <input
               type="date"
               value={filterDateTo}
-              onChange={(e) => { setFilterDateTo(e.target.value); setCurrentPage(1); }}
+              onChange={(e) => { 
+                setFilterDateTo(e.target.value); 
+                if (e.target.value) setFilterPeriod('Todos');
+                setCurrentPage(1); 
+              }}
               className="text-xs border border-[#c0c9bb] bg-[#f9f9f9] rounded-lg p-2 focus:border-[#00450d] focus:ring-0 text-[#1a1c1c] outline-none h-10"
             />
           </div>
@@ -389,6 +438,8 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
               <option value="Licencia">Licencia</option>
               <option value="Vacaciones">Vacaciones</option>
               <option value="Bonificación">Bonificación</option>
+              <option value="Parte de Enfermo">Parte de Enfermo</option>
+              <option value="Registro Administración">Registro Administración</option>
             </select>
           </div>
 
@@ -404,6 +455,21 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
               <option value="temporal">Temporal</option>
               <option value="mensualizado">Mensualizado</option>
               <option value="permanente">Permanente</option>
+            </select>
+          </div>
+
+          {/* Categoría */}
+          <div className="flex flex-col gap-1 lg:col-span-1">
+            <label className="text-[11px] font-bold text-[#717a6d] uppercase tracking-wider">Categoría</label>
+            <select
+              value={filterCategory}
+              onChange={(e) => { setFilterCategory(e.target.value); setCurrentPage(1); }}
+              className="text-xs border border-[#c0c9bb] bg-[#f9f9f9] rounded-lg p-2.5 focus:border-[#00450d] focus:ring-0 text-[#1a1c1c] outline-none h-10 font-semibold"
+            >
+              <option value="Todas">Todas</option>
+              {Array.from(new Set(workers.map(w => w.category))).map(c => (
+                <option key={c} value={c}>{c}</option>
+              ))}
             </select>
           </div>
 
@@ -475,18 +541,31 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
                   const total = e.amount > 0 ? e.amount : (displayVal * (e.rate || (workerInfo.category === 'General' ? 4000 : 5000)));
 
                   return (
-                    <tr key={e.id} className="hover:bg-[#f3f3f3]/40 transition-colors">
+                    <tr key={e.id} className="border-b border-[#c0c9bb]/20 last:border-0 hover:bg-[#98f994]/5 transition-colors">
                       <td className="px-5 py-4 text-xs font-mono text-[#717a6d] font-medium">
                         {e.date}
                       </td>
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-[#91d78a]/30 text-[#0c5216] flex items-center justify-center font-bold text-xs border border-[#c0c9bb]/20">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs border ${
+                            workerInfo.isUnknown
+                              ? 'bg-[#ffdad6] text-[#ba1a1a] border-[#ba1a1a]/40'
+                              : 'bg-[#91d78a]/30 text-[#0c5216] border-[#c0c9bb]/20'
+                          }`}>
                             {workerInfo.initials}
                           </div>
                           <div>
-                            <p className="text-xs font-bold text-[#1a1c1c]">{workerInfo.name}</p>
-                            <p className="text-[10px] text-[#717a6d]">{workerInfo.category}</p>
+                            {workerInfo.isUnknown ? (
+                              <>
+                                <p className="text-xs font-bold text-[#ba1a1a]">Trabajador Desconocido</p>
+                                <p className="text-[10px] font-bold text-[#ba1a1a] uppercase tracking-wide">Falla de Sincronización</p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-xs font-bold text-[#1a1c1c]">{workerInfo.name}</p>
+                                <p className="text-[10px] text-[#717a6d]">{workerInfo.category}</p>
+                              </>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -539,7 +618,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
                       </td>
                       <td className="px-5 py-4 text-center">
                         <div className="flex items-center justify-center gap-2">
-                          {!e.locked && userRole !== 'visor' && (
+                          {!e.locked && userRole !== 'visor' && (userRole === 'direccion' || userRole === 'admin' || e.created_by === currentUserId) && (
                             <button
                               onClick={() => handleOpenEdit(e)}
                               className="p-1 px-2.5 text-[#006e1c] hover:bg-[#98f994]/40 rounded-lg transition-all"
@@ -548,7 +627,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
                               <Edit2 className="w-3.5 h-3.5" />
                             </button>
                           )}
-                          {!e.locked && (userRole === 'admin' || userRole === 'encargado') && (
+                          {!e.locked && userRole !== 'visor' && (userRole === 'direccion' || e.created_by === currentUserId) && (
                             <button
                               onClick={() => handleDeleteClick(e)}
                               className="p-1 px-2.5 text-[#ba1a1a] hover:bg-[#ffdad6]/50 rounded-lg transition-all"
@@ -557,7 +636,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
-                          {(!e.locked && userRole !== 'admin' && userRole !== 'encargado' && userRole !== 'visor') && (
+                          {(!e.locked && userRole !== 'direccion' && userRole !== 'admin' && userRole !== 'encargado' && userRole !== 'visor') && (
                             <span className="text-[10px] text-[#717a6d] font-semibold italic bg-[#f3f3f3] px-1.5 py-0.5 rounded">
                               Lectura/Edición
                             </span>
@@ -679,12 +758,19 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
                     <option value="Trabajos al día">Trabajos al día</option>
                     <option value="Trabajos al tanto">Trabajos al tanto</option>
                     <option value="Injertación">Injertación</option>
-                    <option value="Adelanto">Adelanto</option>
-                    <option value="Descuento">Descuento</option>
-                    <option value="Feriado">Feriado</option>
-                    <option value="Licencia">Licencia</option>
-                    <option value="Vacaciones">Vacaciones</option>
-                    <option value="Bonificación">Bonificación</option>
+                    <option value="Trabajos Tercerizados">Trabajos Tercerizados</option>
+                    {userRole !== 'encargado' && (
+                      <>
+                        <option value="Adelanto">Adelanto</option>
+                        <option value="Descuento">Descuento</option>
+                        <option value="Feriado">Feriado</option>
+                        <option value="Licencia">Licencia</option>
+                        <option value="Vacaciones">Vacaciones</option>
+                        <option value="Bonificación">Bonificación</option>
+                        <option value="Parte de Enfermo">Parte de Enfermo</option>
+                        <option value="Registro Administración">Registro Administración</option>
+                      </>
+                    )}
                   </select>
                 </div>
               </div>
