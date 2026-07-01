@@ -24,17 +24,22 @@
 -- =====================================================================
 
 -- 1) RESPALDO (por si hay que revertir). Snapshot de las filas afectadas.
+--    Cubre ambas formas: sin acento ('Trabajos al dia') y con acento pero con la
+--    unidad equivocada ('Trabajos al día' + 'unid'), que es como queda la
+--    re-contaminacion despues de desplegar la 2.7.1 (el tipo ya va con acento,
+--    pero un cache viejo puede seguir subiendo unidad 'unid').
 create table if not exists entries_v4_backup_trabajos_dia_20260701 as
 select *
 from entries_v4
-where tipo = 'Trabajos al dia'
+where tipo in ('Trabajos al dia', 'Trabajos al día')
   and unidad = 'unid';
 
--- 2) CORRECCION. Solo las 526 filas legacy: tipo exacto sin acento + unidad 'unid'.
+-- 2) CORRECCION. Tipo con acento + unidad 'hs' (asi el valor se lee como horas).
+--    El numero (cantidad) NO se toca: solo pasa a leerse como horas.
 update entries_v4
 set tipo   = 'Trabajos al día',
     unidad = 'hs'
-where tipo = 'Trabajos al dia'
+where tipo in ('Trabajos al dia', 'Trabajos al día')
   and unidad = 'unid';
 
 -- 3) VERIFICACION. Tras el update deberia quedar UNA sola combinacion:
