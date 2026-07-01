@@ -270,7 +270,11 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       'Adel Transferencia': r.adelantoTransferencia ? -r.adelantoTransferencia : '',
       'Total Adelantos': -(r.adelantoEfectivo + r.adelantoTransferencia),
       'Descuentos': r.descuentos ? -r.descuentos : '',
-      'Neto': r.neto
+      'Neto': r.neto,
+      // Saldo real SIN clampear a 0: si es negativo, es lo que se pago DE MAS
+      // (a recuperar en el proximo periodo). El Neto queda como "lo que falta
+      // pagar" (nunca negativo); el Saldo muestra el excedente que el Neto oculta.
+      'Saldo': r.bruto - r.adelantoEfectivo - r.adelantoTransferencia - r.descuentos
     }));
 
     const totBruto = sumRows.reduce((s, r) => s + (Number(r['Bruto']) || 0), 0);
@@ -279,6 +283,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     const totAdelanto = sumRows.reduce((s, r) => s + (Number(r['Total Adelantos']) || 0), 0);
     const totDesc = sumRows.reduce((s, r) => s + (Number(r['Descuentos']) || 0), 0);
     const totNeto = sumRows.reduce((s, r) => s + (Number(r['Neto']) || 0), 0);
+    const totSaldo = sumRows.reduce((s, r) => s + (Number(r['Saldo']) || 0), 0);
     const totHs = sumRows.reduce((s, r) => s + (Number(r['Horas']) || 0), 0);
 
     sumRows.push({
@@ -292,7 +297,8 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       'Adel Transferencia': totAdelTr,
       'Total Adelantos': totAdelanto,
       'Descuentos': totDesc,
-      'Neto': totNeto
+      'Neto': totNeto,
+      'Saldo': totSaldo
     });
 
     let validWorkerIds = payrollRows.map(r => r.id);
@@ -334,7 +340,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
 
     const wb = XLSX.utils.book_new();
     const ws1 = XLSX.utils.json_to_sheet(sumRows);
-    ws1['!cols'] = [{wch:4},{wch:28},{wch:18},{wch:14},{wch:8},{wch:14},{wch:14},{wch:16},{wch:14},{wch:14},{wch:14}];
+    ws1['!cols'] = [{wch:4},{wch:28},{wch:18},{wch:14},{wch:8},{wch:14},{wch:14},{wch:16},{wch:14},{wch:14},{wch:14},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws1, 'Liquidacion');
     
     if (detRows.length > 0) {
@@ -511,7 +517,9 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
           'Adel Efectivo': adelantoEfectivo ? -adelantoEfectivo : '',
           'Adel Transferencia': adelantoTransferencia ? -adelantoTransferencia : '',
           'Descuentos': descuentos ? -descuentos : '',
-          'Neto': neto
+          'Neto': neto,
+          // Saldo real SIN clampear: negativo = pagado DE MAS (a recuperar).
+          'Saldo': bruto - adelantoEfectivo - adelantoTransferencia - descuentos
         };
     }).filter(r => r.Bruto > 0 || r['Adel Efectivo'] !== '' || r['Adel Transferencia'] !== '' || r.Descuentos !== '');
 
@@ -520,6 +528,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     const totAdelTr = sumRows.reduce((s, r) => s + (Number(r['Adel Transferencia']) || 0), 0);
     const totDesc = sumRows.reduce((s, r) => s + (Number(r['Descuentos']) || 0), 0);
     const totNeto = sumRows.reduce((s, r) => s + (Number(r['Neto']) || 0), 0);
+    const totSaldo = sumRows.reduce((s, r) => s + (Number(r['Saldo']) || 0), 0);
     const totHs = sumRows.reduce((s, r) => s + (Number(r['Horas']) || 0), 0);
 
     sumRows.push({
@@ -531,7 +540,8 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       'Adel Efectivo': totAdelEf,
       'Adel Transferencia': totAdelTr,
       'Descuentos': totDesc,
-      'Neto': totNeto
+      'Neto': totNeto,
+      'Saldo': totSaldo
     });
 
     let validWorkerIds = tempWorkers.map(r => r.id);
@@ -563,7 +573,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     const filename = `Reporte_Temporarios_${selectedMonthReport}`;
     const wb = XLSX.utils.book_new();
     const ws1 = XLSX.utils.json_to_sheet(sumRows);
-    ws1['!cols'] = [{wch:4},{wch:28},{wch:18},{wch:8},{wch:14},{wch:14},{wch:16},{wch:14},{wch:14}];
+    ws1['!cols'] = [{wch:4},{wch:28},{wch:18},{wch:8},{wch:14},{wch:14},{wch:16},{wch:14},{wch:14},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws1, 'Resumen_Mensual');
     
     if (detRows.length > 0) {
@@ -704,17 +714,21 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
                 <th className="p-3 font-bold text-right">Adel. Transf.</th>
                 <th className="p-3 font-bold text-right">Descuentos</th>
                 <th className="p-3 font-bold text-right text-[#00450d]">Neto</th>
+                <th className="p-3 font-bold text-right" title="Saldo real sin tope: negativo = pagado de más (a recuperar)">Saldo</th>
                 <th className="p-3 font-bold text-center">Estado</th>
               </tr>
             </thead>
             <tbody>
               {payrollRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-8 text-center text-xs text-[#717a6d]">
+                  <td colSpan={10} className="p-8 text-center text-xs text-[#717a6d]">
                     No hay información registrada para liquidar en el período seleccionado.
                   </td>
                 </tr>
-              ) : payrollRows.map((row) => (
+              ) : payrollRows.map((row) => {
+                // Saldo real sin clampear: negativo = pagado de más (a recuperar).
+                const saldo = row.bruto - row.adelantoEfectivo - row.adelantoTransferencia - row.descuentos;
+                return (
                 <tr key={row.id} className="border-b border-[#c0c9bb]/20 hover:bg-[#f9f9f9]/50 transition-colors">
                   <td className="p-3">
                     <div className="font-bold text-xs text-[#1a1c1c]">{row.name}</div>
@@ -743,6 +757,9 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
                   <td className="p-3 text-right text-sm font-bold text-[#00450d]">
                     {formatCurrency(row.neto)}
                   </td>
+                  <td className={`p-3 text-right text-xs font-semibold ${saldo < 0 ? 'text-[#ba1a1a]' : 'text-[#717a6d]'}`}>
+                    {saldo < 0 ? `-${formatCurrency(Math.abs(saldo))}` : formatCurrency(saldo)}
+                  </td>
                   <td className="p-3 text-center">
                     {row.state === 'paid' && (
                       <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#006e1c] shadow-[0_0_8px_#006e1c]" title="Calculado y Listo"></span>
@@ -755,7 +772,8 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {payrollRows.length > 0 && (
                 <tr className="bg-[#f3f3f3] font-bold text-xs border-t-2 border-[#c0c9bb]/50">
                   <td className="p-3 text-[#1a1c1c]" colSpan={2}>TOTALES</td>
@@ -777,6 +795,14 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
                   <td className="p-3 text-right text-[#00450d] text-sm">
                     {formatCurrency(summaryMetrics.totalNet)}
                   </td>
+                  {(() => {
+                    const totalSaldo = payrollRows.reduce((s, r) => s + (r.bruto - r.adelantoEfectivo - r.adelantoTransferencia - r.descuentos), 0);
+                    return (
+                      <td className={`p-3 text-right text-sm ${totalSaldo < 0 ? 'text-[#ba1a1a]' : 'text-[#1a1c1c]'}`}>
+                        {totalSaldo < 0 ? `-${formatCurrency(Math.abs(totalSaldo))}` : formatCurrency(totalSaldo)}
+                      </td>
+                    );
+                  })()}
                   <td className="p-3"></td>
                 </tr>
               )}
