@@ -301,6 +301,18 @@ export async function testSupabaseConnection(url: string, anonKey: string): Prom
  * modo que al bajar registros se perdía el autor y el filtro del rol "encargado"
  * (que sólo ve lo suyo) ocultaba todo lo descargado.
  */
+// Normaliza tipos legacy sin acento a su forma canonica del catalogo. Una version
+// vieja guardaba "Trabajos al dia" SIN acento, lo que duplicaba el tipo en los
+// informes (dos filas "Trabajos al dia" / "Trabajos al día"). Ademas, los
+// dispositivos con cache viejo re-suben ese texto al sincronizar y re-contaminan
+// la base; por eso normalizamos tanto al LEER (mapServerRowToEntry) como al SUBIR
+// (payload del upsert), sin depender de limpiar los datos una sola vez.
+function canonicalizeEntryType(raw: string): string {
+  const key = String(raw || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+  if (key === 'trabajos al dia') return 'Trabajos al día';
+  return raw;
+}
+
 function mapServerRowToEntry(s: any, localWorkers: Worker[]): Entry {
   let hours = 0;
   let quantity = 0;
@@ -378,11 +390,22 @@ function mapServerRowToEntry(s: any, localWorkers: Worker[]): Entry {
     }
   }
 
+  const canonType = canonicalizeEntryType(s.tipo);
+  // Auto-correccion legacy: "Trabajos al día" se mide por HORAS. Los registros
+  // viejos (sin acento, unidad 'unid') guardaban el valor como cantidad. Si el
+  // tipo canonico es por horas pero el valor cayo en cantidad, lo leemos como
+  // horas, para que informes y liquidacion salgan bien aunque un cache viejo
+  // vuelva a subir esos registros con la unidad equivocada.
+  if (canonType === 'Trabajos al día' && quantity > 0 && hours === 0) {
+    hours = quantity;
+    quantity = 0;
+  }
+
   return {
     id: String(s.id),
     worker_id: worker_id || UNKNOWN_WORKER_ID,
     date: s.fecha,
-    type: s.tipo,
+    type: canonType,
     location: s.lugar || '',
     quadro: s.cuadro || '',
     specie: s.especie || '',
@@ -746,7 +769,7 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
           mes,
           anio,
           periodo: calculatedPeriodo,
-          tipo: entry.type,
+          tipo: canonicalizeEntryType(entry.type),
           nombre,
           categoria: workerObj?.category || 'Peon General',
           regimen: workerObj?.regime || 'temporal',
