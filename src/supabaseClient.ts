@@ -537,12 +537,28 @@ export async function fetchServerEntries(): Promise<{ success: boolean; entries:
  */
 // Lock "single-flight": la sincronización lee y reescribe TODO el localStorage,
 // así que dos syncs solapados (p. ej. dos altas seguidas, o el botón manual
-// mientras corre el sync de fondo) podían pisarse datos entre sí. Si ya hay un
-// sync en curso, las llamadas nuevas se cuelgan de esa misma promesa.
+// mientras corre el sync de fondo) podían pisarse datos entre sí.
+//
+// Si ya hay un sync en curso NO basta con devolver esa misma promesa: el sync
+// en curso pudo haber pasado ya la fase de subida y no incluiría el cambio
+// recién hecho (y el refresh posterior lo pisaría con la versión vieja del
+// servidor). Por eso se encola EXACTAMENTE un sync más, que arranca al
+// terminar el actual y lee el localStorage ya con todos los cambios nuevos.
+// Todas las llamadas que lleguen durante el sync en curso comparten ese
+// mismo sync encolado.
 let syncInFlight: Promise<SyncResult> | null = null;
+let syncQueued: Promise<SyncResult> | null = null;
 
 export function performBidirectionalSync(): Promise<SyncResult> {
-  if (syncInFlight) return syncInFlight;
+  if (syncInFlight) {
+    if (!syncQueued) {
+      syncQueued = syncInFlight.then(() => {
+        syncQueued = null;
+        return performBidirectionalSync();
+      });
+    }
+    return syncQueued;
+  }
   syncInFlight = doBidirectionalSync().finally(() => {
     syncInFlight = null;
   });
