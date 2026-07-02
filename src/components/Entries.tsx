@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Entry, Worker, MasterCatalogs, formatCurrency } from '../types';
+import { Entry, Worker, MasterCatalogs, formatCurrency, localDateStr } from '../types';
 import { Search, Filter, Trash2, Edit2, ChevronLeft, ChevronRight, CheckCircle, Info, Calendar, MoreHorizontal, X, FileEdit, Lock, Download, RefreshCw } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { performBidirectionalSync } from '../supabaseClient';
@@ -119,6 +119,11 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
         return false;
       }
 
+      // 3.2 Filter by Forma de Pago (antes el selector existía pero no filtraba nada)
+      if (filterFormaPago !== 'Todos' && (e.paymentMethod || '').toLowerCase() !== filterFormaPago.toLowerCase()) {
+        return false;
+      }
+
       // 3.5 Filter by Regime (sólo descarta si hay un filtro específico activo;
       // los registros con trabajador desconocido permanecen visibles por defecto)
       if (filterRegime !== 'Todos' && worker?.regime !== filterRegime) {
@@ -165,7 +170,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       }
       return b.id.localeCompare(a.id);
     });
-  }, [entries, workers, searchTerm, filterWorkerId, filterType, filterFormaPago, filterRegime, filterPeriod, filterDateFrom, filterDateTo]);
+  }, [entries, workers, searchTerm, filterWorkerId, filterType, filterFormaPago, filterRegime, filterCategory, filterPeriod, filterDateFrom, filterDateTo, userRole, currentUserId]);
 
   // Aggregate stats
   const stats = useMemo(() => {
@@ -307,7 +312,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       {wch: 10}, {wch: 14}, {wch: 14}, {wch: 14}, {wch: 30}
     ];
 
-    XLSX.writeFile(wb, `Registros_Laborales_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(wb, `Registros_Laborales_${localDateStr()}.xlsx`);
   };
 
   return (

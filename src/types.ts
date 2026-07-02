@@ -62,6 +62,17 @@ export interface WhatsAppMessage {
   created_at: string;
 }
 
+// Fecha local en formato YYYY-MM-DD. NUNCA usar toISOString() para esto:
+// devuelve la fecha en UTC, y en Argentina (UTC-3) a partir de las 21:00
+// "salta" al día siguiente (partes rechazados por "fecha futura", Dashboard
+// mostrando 0 registros de hoy, etc.).
+export const localDateStr = (d: Date = new Date()): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 export const formatCurrency = (value: number): string => {
   const isNegative = value < 0;
   const absValue = Math.abs(value);

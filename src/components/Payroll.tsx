@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Entry, Worker, MasterCatalogs } from '../types';
+import { Entry, Worker, MasterCatalogs, localDateStr } from '../types';
 import { FileText, Download, Calendar, DollarSign, Users, AlertCircle, Search, Filter, Lock, RefreshCw, X, FileSpreadsheet } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { generateEntryId } from '../supabaseClient';
@@ -27,9 +27,9 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
   const [customStartDate, setCustomStartDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - 6);
-    return d.toISOString().split('T')[0];
+    return localDateStr(d);
   });
-  const [customEndDate, setCustomEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [customEndDate, setCustomEndDate] = useState(() => localDateStr());
   const [showOnlyPending, setShowOnlyPending] = useState(true);
 
   const [showMonthlyReportModal, setShowMonthlyReportModal] = useState(false);
@@ -76,10 +76,10 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       if (e.deleted) return;
       const w = workers.find(wk => wk.id === e.worker_id);
       if (!w) return;
-      
+
       const [year, month, day] = e.date.split('-');
       const dNum = Number(day);
-      
+
       if (activeTab === 'weekly') {
         if (w.regime === 'temporal') {
           if (periodoMode === 'quincenal') {
@@ -90,10 +90,10 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
             const subDays = dayOfWeek === 5 ? 0 : dayOfWeek === 6 ? 1 : dayOfWeek + 2;
             const friday = new Date(d);
             friday.setDate(d.getDate() - subDays);
-            const friStr = friday.toISOString().split('T')[0];
+            const friStr = localDateStr(friday);
             const thurs = new Date(friday);
             thurs.setDate(friday.getDate() + 6);
-            const thuStr = thurs.toISOString().split('T')[0];
+            const thuStr = localDateStr(thurs);
             periods.add(`${friStr} a ${thuStr}`);
           }
         }
@@ -154,11 +154,11 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
 
   const hasPendingBeforeStart = useMemo(() => {
     if (activeTab !== 'weekly' || periodoMode === 'quincenal') return false;
-    return entries.some(e => 
-      !e.deleted && 
-      !e.locked && 
-      e.date < customStartDate && 
-      workers.find(w => w.id === e.worker_id && w.regime === 'temporal')
+    return entries.some(e =>
+      !e.deleted &&
+      !e.locked &&
+      e.date < customStartDate &&
+      workers.find(w => w.id === e.worker_id)?.regime === 'temporal'
     );
   }, [entries, workers, activeTab, periodoMode, customStartDate]);
 
@@ -235,7 +235,9 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       if (filterPaymentMethod === 'Transferencia' && row.adelantoTransferencia === 0) return false;
       return true;
     });
-  }, [activeWorkers, entries, activeTab, selectedPeriodRange, filterPaymentMethod]);
+    // showOnlyPending y periodoMode FALTABAN en las dependencias: el checkbox
+    // "Ocultar ya liquidados" no refrescaba la tabla hasta tocar otro filtro.
+  }, [activeWorkers, entries, activeTab, selectedPeriodRange, filterPaymentMethod, showOnlyPending, periodoMode]);
 
   const summaryMetrics = useMemo(() => ({
     totalNet: payrollRows.reduce((s, r) => s + r.neto, 0),
@@ -391,7 +393,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       if (onAddEntries && selectedPeriodRange) {
         const nextDay = new Date(selectedPeriodRange.endStr + 'T00:00:00');
         nextDay.setDate(nextDay.getDate() + 1);
-        const nextDayStr = nextDay.toISOString().split('T')[0];
+        const nextDayStr = localDateStr(nextDay);
         
         const carryOverEntries: Entry[] = payrollRows
           .filter(r => (r.bruto - r.adelantoEfectivo - r.adelantoTransferencia - r.descuentos) < 0)

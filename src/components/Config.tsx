@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Worker, MasterCatalogs, formatCurrency } from '../types';
+import { Worker, MasterCatalogs, formatCurrency, localDateStr } from '../types';
 import { performBidirectionalSync, getCurrentSupabaseUser, registerSupabaseUser, fetchAuditLogs, AuditLogItem } from '../supabaseClient';
 import { Database, Plus, Edit2, Trash2, ShieldCheck, Eye, EyeOff, CheckCircle2, AlertTriangle, Play, RefreshCw, MapPin, Leaf, BookOpen, Clock, Loader2, Coins, History, FileText, Terminal, Download, Upload, Lock } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -23,7 +23,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
-  const [authRole, setAuthRole] = useState<'admin' | 'operador'>('admin');
+  const [authRole, setAuthRole] = useState<'admin' | 'encargado' | 'visor'>('admin');
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const [isRegisterMode, setIsRegisterMode] = useState(false);
@@ -50,7 +50,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
   });
 
   // Catalogs states
-  const [showAddCatalogItem, setShowAddCatalogItem] = useState<{ type: 'location' | 'specie' | 'activity' | null }>({ type: null });
+  const [showAddCatalogItem, setShowAddCatalogItem] = useState<{ type: 'location' | 'specie' | 'activity' | 'category' | null }>({ type: null });
   const [newCatalogItemText, setNewCatalogItemText] = useState('');
   const [newCategoryRate, setNewCategoryRate] = useState(4000);
 
@@ -108,7 +108,10 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
   }, []);
 
   useEffect(() => {
-    if (currentUser && currentUser.role === 'admin') {
+    // La sección de bitácora solo se muestra para 'direccion' (antes se
+    // cargaba para 'admin', que nunca la ve, y Dirección quedaba sin datos
+    // hasta apretar "Actualizar Bitácora" a mano).
+    if (currentUser && currentUser.role === 'direccion') {
       handleLoadAuditLogs();
     } else {
       setAuditLogs([]);
@@ -149,7 +152,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Backup_Bobadilla_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `Backup_Bobadilla_${localDateStr()}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -291,7 +294,7 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Personal");
-    XLSX.writeFile(wb, `Personal_Bobadilla_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(wb, `Personal_Bobadilla_${localDateStr()}.xlsx`);
   };
 
   const handleDeleteWorker = (id: string) => {
@@ -314,7 +317,9 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
       const updated = { ...catalogs, species: [...catalogs.species, newCatalogItemText] };
       onUpdateCatalogs(updated);
     } else if (type === 'activity') {
-      const updated = { ...catalogs, activities: [...catalogs.activities, newCatalogItemText] };
+      // activities es un objeto { actividad: [subtareas] }, no un array:
+      // hacer spread como array crasheaba la app al agregar una actividad.
+      const updated = { ...catalogs, activities: { ...catalogs.activities, [newCatalogItemText]: [] } };
       onUpdateCatalogs(updated);
     } else if (type === 'category') {
       const updated = { ...catalogs, categories: [...catalogs.categories, { name: newCatalogItemText, description: 'Nómina agropecuaria', defaultRate: newCategoryRate }] };

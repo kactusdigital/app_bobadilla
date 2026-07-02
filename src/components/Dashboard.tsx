@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Entry, Worker, formatCurrency } from '../types';
+import { Entry, Worker, formatCurrency, localDateStr } from '../types';
 import { Calendar, DollarSign, TrendingUp, Sparkles, Clock, AlertTriangle, UserCheck, CheckCircle2 } from 'lucide-react';
 
 interface DashboardProps {
@@ -26,31 +26,22 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
   }, [entries, userRole, currentUserId]);
 
   // Calculations
-  const todayStr = useMemo(() => {
-    return new Date().toISOString().split('T')[0];
-  }, []);
+  // Fecha LOCAL (no UTC): con toISOString, después de las 21:00 en Argentina
+  // "hoy" pasaba a ser mañana y la tarjeta Registros Hoy quedaba en 0.
+  const todayStr = useMemo(() => localDateStr(), []);
 
   const stats = useMemo(() => {
     const todayEntries = activeEntries.filter(e => e.date === todayStr);
     const todayCount = todayEntries.length;
-    
+
     // Total hours
     const totalHours = activeEntries.reduce((sum, e) => sum + (e.hours > 0 ? e.hours : (e.quantity > 0 ? e.quantity : 0)), 0);
-    
+
     // Total Period Cost (Bruto Total)
     const totalCost = activeEntries.reduce((sum, e) => {
-      // Find worker to check rate or use record's custom rate
-      const worker = workers.find(w => w.id === e.worker_id);
-      
       if (['Adelanto', 'Descuento', 'Bonificación'].includes(e.type)) {
         return sum; // Do not mix cash advances/deductions into the gross labor cost
       }
-      
-      if (worker && worker.regime === 'mensualizado') {
-        // Mensualizado hours don't affect payment directly (handled in payroll)
-        return sum + (e.amount || 0);
-      }
-      
       return sum + (e.amount || 0);
     }, 0);
 
@@ -59,7 +50,7 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
       totalHours,
       totalCost
     };
-  }, [activeEntries, workers, todayStr]);
+  }, [activeEntries, todayStr]);
 
   // Dynamic calculation for chart based on timeframe
   const weeklyData = useMemo(() => {
@@ -71,11 +62,8 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
     for (let i = daysCount - 1; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
       dates.push({
-        dateStr: `${yyyy}-${mm}-${dd}`,
+        dateStr: localDateStr(d),
         dayName: daysNames[d.getDay()],
         isToday: i === 0
       });

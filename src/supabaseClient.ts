@@ -427,6 +427,30 @@ function mapServerRowToEntry(s: any, localWorkers: Worker[]): Entry {
 }
 
 /**
+ * Descarga TODAS las filas de `entries_v4` paginando. El REST de Supabase
+ * devuelve como máximo 1000 filas por petición: sin esto, cualquier lectura
+ * con `select('*')` queda silenciosamente truncada cuando la tabla crece.
+ */
+async function fetchAllEntryRows(client: SupabaseClient): Promise<{ rows: any[]; error: string | null }> {
+  const PAGE = 1000;
+  let from = 0;
+  const rows: any[] = [];
+  while (true) {
+    const { data, error } = await client
+      .from('entries_v4')
+      .select('*')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) return { rows, error: error.message };
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return { rows, error: null };
+}
+
+/**
  * CAPA 1 — Fuente de verdad en el servidor.
  *
  * Trae TODOS los registros activos directamente de `entries_v4` (paginando, porque
@@ -454,22 +478,9 @@ export async function fetchServerEntries(): Promise<{ success: boolean; entries:
     const localWorkers: Worker[] = JSON.parse(localStorage.getItem(WORKERS_KEY) || '[]');
 
     // 3. Descargar TODAS las filas paginando (1000 por página).
-    const PAGE = 1000;
-    let from = 0;
-    const rawRows: any[] = [];
-    while (true) {
-      const { data, error } = await client
-        .from('entries_v4')
-        .select('*')
-        .order('id', { ascending: true })
-        .range(from, from + PAGE - 1);
-      if (error) {
-        return { success: false, entries: [], message: error.message };
-      }
-      if (!data || data.length === 0) break;
-      rawRows.push(...data);
-      if (data.length < PAGE) break;
-      from += PAGE;
+    const { rows: rawRows, error: rowsError } = await fetchAllEntryRows(client);
+    if (rowsError) {
+      return { success: false, entries: [], message: rowsError };
     }
 
     // 4. Mapear (excluyendo borrados).
@@ -613,7 +624,9 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
         }
         const loadedLocations = serverMainData.lugares || [];
         const loadedSpecies = serverMainData.especies || [];
-        let loadedActivities = localCatalogs?.activities || [];
+        // activities es un objeto { actividad: [subtareas] }: el fallback debe
+        // ser {} (con [] el catálogo de actividades quedaba corrupto como array).
+        let loadedActivities: Record<string, string[]> = localCatalogs?.activities || {};
 
         if (serverActData && serverActData.categorias) {
           loadedActivities = serverActData.categorias;
@@ -716,14 +729,15 @@ export async function performBidirectionalSync(): Promise<SyncResult> {
     // ----------------------------------------
     // 5. Download server active entries
     // ----------------------------------------
-    const { data: serverEntries, error: getError } = await client
-      .from('entries_v4')
-      .select('*');
+    // Paginado: sin esto Supabase corta en 1000 filas y todo lo que quedaba
+    // afuera se consideraba "no existe en el servidor" (re-subidas masivas y
+    // merge incompleto hacia local).
+    const { rows: serverEntries, error: getError } = await fetchAllEntryRows(client);
 
     if (getError) {
       console.warn('Error downloading server entries:', getError);
     }
-    
+
     const serverMap = new Map<string, any>();
     if (serverEntries) {
       for (const s of serverEntries) {

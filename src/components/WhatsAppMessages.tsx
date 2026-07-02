@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Check, X, Edit, MessageSquare, AlertCircle } from 'lucide-react';
-import { WhatsAppMessage, Entry, Worker, MasterCatalogs } from '../types';
+import { WhatsAppMessage, Entry, Worker, MasterCatalogs, localDateStr } from '../types';
 import { fetchPendingWhatsAppMessages, updateWhatsAppMessageStatus, generateEntryId } from '../supabaseClient';
 
 interface Props {
@@ -60,7 +60,7 @@ export function WhatsAppMessages({ onAddEntries, workers, catalogs }: Props) {
     return {
       id: generateEntryId(),
       worker_id: worker.id,
-      date: payload.fecha || new Date().toISOString().split('T')[0],
+      date: payload.fecha || localDateStr(),
       type: payload.tipo || 'Trabajos al día',
       location: payload.lugar || '',
       quadro: payload.cuadro || '',

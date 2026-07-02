@@ -298,9 +298,15 @@ export default function App() {
       // parte ya existe" y actualizarlo en lugar de duplicarlo.
       client_uuid: item.client_uuid || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`)
     }));
-    const updated = [...entries, ...stampedList];
-    setEntries(updated);
-    localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+    // Actualización FUNCIONAL sobre el estado previo: si otro handler acaba de
+    // modificar entries en este mismo tick (p. ej. cerrar período llama a
+    // onLockEntries y luego a onAddEntries), partir de la variable `entries`
+    // del closure pisaría esos cambios (se perdían los locked del cierre).
+    setEntries(prev => {
+      const updated = [...prev, ...stampedList];
+      localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+      return updated;
+    });
 
     // Background sync try
     performBidirectionalSync().then(async res => {
@@ -314,9 +320,11 @@ export default function App() {
 
   const handleUpdateEntry = (id: string, updatedFields: Partial<Entry>) => {
     if (!currentUser) return;
-    const updated = entries.map(e => (e.id === id ? { ...e, ...updatedFields } : e));
-    setEntries(updated);
-    localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+    setEntries(prev => {
+      const updated = prev.map(e => (e.id === id ? { ...e, ...updatedFields } : e));
+      localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+      return updated;
+    });
 
     // Background sync try
     performBidirectionalSync().then(async res => {
@@ -331,11 +339,13 @@ export default function App() {
   const handleDeleteEntry = (id: string) => {
     if (!currentUser) return;
     // Soft delete locally
-    const updated = entries.map(e => 
-      e.id === id ? { ...e, deleted: true, updated_at: new Date().toISOString() } : e
-    );
-    setEntries(updated);
-    localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+    setEntries(prev => {
+      const updated = prev.map(e =>
+        e.id === id ? { ...e, deleted: true, updated_at: new Date().toISOString() } : e
+      );
+      localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+      return updated;
+    });
 
     // Background sync try
     performBidirectionalSync().then(async res => {
@@ -359,20 +369,26 @@ export default function App() {
   };
 
   const handleLockEntries = (entryIds: string[]) => {
-    const updatedEntries = entries.map(e => 
-      entryIds.includes(e.id) ? { ...e, locked: true, updated_at: new Date().toISOString() } : e
-    );
-    setEntries(updatedEntries);
-    localStorage.setItem('bobadilla_entries', JSON.stringify(updatedEntries));
+    const idSet = new Set(entryIds);
+    setEntries(prev => {
+      const updated = prev.map(e =>
+        idSet.has(e.id) ? { ...e, locked: true, updated_at: new Date().toISOString() } : e
+      );
+      localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+      return updated;
+    });
   };
 
   const handleUpdateMultipleEntries = (updates: {id: string, changes: Partial<Entry>}[]) => {
-    const updatedEntries = entries.map(e => {
-      const update = updates.find(u => u.id === e.id);
-      return update ? { ...e, ...update.changes, updated_at: new Date().toISOString() } : e;
+    const byId = new Map(updates.map(u => [u.id, u.changes]));
+    setEntries(prev => {
+      const updated = prev.map(e => {
+        const changes = byId.get(e.id);
+        return changes ? { ...e, ...changes, updated_at: new Date().toISOString() } : e;
+      });
+      localStorage.setItem('bobadilla_entries', JSON.stringify(updated));
+      return updated;
     });
-    setEntries(updatedEntries);
-    localStorage.setItem('bobadilla_entries', JSON.stringify(updatedEntries));
   };
 
   const handleLogout = async () => {

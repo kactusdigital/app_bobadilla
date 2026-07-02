@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Worker, Entry, MasterCatalogs } from '../types';
+import { Worker, Entry, MasterCatalogs, localDateStr } from '../types';
 import { CheckCircle, Save, Loader2, ArrowLeft, Search, Filter, AlertCircle } from 'lucide-react';
 import { generateEntryId } from '../supabaseClient';
 
@@ -16,7 +16,7 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate, 
   const [step, setStep] = useState<1 | 2>(1);
 
   // --- Step 1 State ---
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(() => localDateStr());
   const [type, setType] = useState('Trabajos al día');
   
   // Filters for Step 1
@@ -250,11 +250,11 @@ export default function AddEntry({ workers, catalogs, onAddEntries, onNavigate, 
                   type="date"
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
-                  max={new Date().toISOString().split('T')[0]}
+                  max={localDateStr()}
                   min={(() => {
                     const d = new Date();
                     d.setDate(d.getDate() - 10);
-                    return d.toISOString().split('T')[0];
+                    return localDateStr(d);
                   })()}
                   className="h-12 px-4 rounded-xl border border-[#c0c9bb] bg-[#f9f9f9] text-sm focus:border-[#00450d] outline-none"
                 />
