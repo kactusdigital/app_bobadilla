@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Entry, Worker, MasterCatalogs, formatCurrency, localDateStr } from '../types';
 import { Search, Filter, Trash2, Edit2, ChevronLeft, ChevronRight, CheckCircle, Info, Calendar, MoreHorizontal, X, FileEdit, Lock, Download, RefreshCw } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { performBidirectionalSync } from '../supabaseClient';
 
 interface EntriesProps {
@@ -78,6 +77,9 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
     }
   };
 
+  // Índice por id para no recorrer la lista de trabajadores por cada registro
+  const workerById = useMemo(() => new Map(workers.map(w => [w.id, w])), [workers]);
+
   // Filter Logic
   const filteredEntries = useMemo(() => {
     return entries.filter(e => {
@@ -94,7 +96,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       // 1. Text Search on Location, activity, or worker initials
       if (searchTerm) {
         const query = searchTerm.toLowerCase();
-        const workerName = workers.find(w => w.id === e.worker_id)?.name.toLowerCase() || '';
+        const workerName = workerById.get(e.worker_id)?.name.toLowerCase() || '';
         const act = e.activity.toLowerCase();
         const loc = e.location.toLowerCase();
         const quad = e.quadro.toLowerCase();
@@ -112,7 +114,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       // NUNCA ocultamos un registro porque no se encuentre su trabajador.
       // Si el worker no existe localmente (fallo de sincronización), el registro
       // igual se muestra en la tabla con una etiqueta roja de advertencia.
-      const worker = workers.find(w => w.id === e.worker_id);
+      const worker = workerById.get(e.worker_id);
 
       // 3. Filter by Type
       if (filterType !== 'Todos' && e.type !== filterType) {
@@ -170,7 +172,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       }
       return b.id.localeCompare(a.id);
     });
-  }, [entries, workers, searchTerm, filterWorkerId, filterType, filterFormaPago, filterRegime, filterCategory, filterPeriod, filterDateFrom, filterDateTo, userRole, currentUserId]);
+  }, [entries, workerById, searchTerm, filterWorkerId, filterType, filterFormaPago, filterRegime, filterCategory, filterPeriod, filterDateFrom, filterDateTo, userRole, currentUserId]);
 
   // Aggregate stats
   const stats = useMemo(() => {
@@ -178,13 +180,13 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
     const totalHours = filteredEntries.reduce((sum, e) => sum + (e.hours > 0 ? e.hours : (e.quantity > 0 ? e.quantity : 0)), 0);
     const totalCost = filteredEntries.reduce((sum, e) => {
       if (e.amount > 0) return sum + e.amount;
-      const rate = e.rate || workers.find(w => w.id === e.worker_id)?.hourlyRate || 0;
+      const rate = e.rate || workerById.get(e.worker_id)?.hourlyRate || 0;
       const val = e.hours > 0 ? e.hours : (e.quantity > 0 ? e.quantity : 0);
       return sum + (val * rate);
     }, 0);
 
     return { totalCount, totalHours, totalCost };
-  }, [filteredEntries, workers]);
+  }, [filteredEntries, workerById]);
 
   // Pagination bounds
   const totalPages = Math.ceil(filteredEntries.length / itemsPerPage) || 1;
@@ -214,7 +216,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
       hours: entry.hours || 0,
       quantity: entry.quantity || 0,
       amount: entry.amount || 0,
-      rate: entry.rate || workers.find(w => w.id === entry.worker_id)?.hourlyRate || 0
+      rate: entry.rate || workerById.get(entry.worker_id)?.hourlyRate || 0
     });
   };
 
@@ -256,7 +258,7 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
   };
 
   const getWorkerInfo = (workerId: string) => {
-    const worker = workers.find(w => w.id === workerId);
+    const worker = workerById.get(workerId);
     if (!worker) return { name: 'Trabajador Desconocido', category: 'Falla de Sincronización', initials: '!', isUnknown: true };
     const parts = worker.name.split(' ');
     const initials = parts.length >= 2
@@ -275,11 +277,15 @@ export default function Entries({ entries, workers, catalogs, onUpdateEntry, onD
     }
   };
 
-  const handleExportFiltered = () => {
+  const handleExportFiltered = async () => {
     if (filteredEntries.length === 0) {
       alert("No hay registros para exportar con los filtros actuales.");
       return;
     }
+
+    // Import dinámico: xlsx es la biblioteca más pesada del bundle y solo se
+    // necesita al exportar, así no infla la carga inicial de la app.
+    const XLSX = await import('xlsx');
 
     const exportData = filteredEntries.map(e => {
       const workerInfo = getWorkerInfo(e.worker_id);

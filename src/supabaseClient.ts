@@ -535,7 +535,21 @@ export async function fetchServerEntries(): Promise<{ success: boolean; entries:
  *    - Store workers and catalogs as JSON columns in row id 'main' and 'activities' in config_v4.
  *    - Whichever is newer gets pushed/pulled.
  */
-export async function performBidirectionalSync(): Promise<SyncResult> {
+// Lock "single-flight": la sincronización lee y reescribe TODO el localStorage,
+// así que dos syncs solapados (p. ej. dos altas seguidas, o el botón manual
+// mientras corre el sync de fondo) podían pisarse datos entre sí. Si ya hay un
+// sync en curso, las llamadas nuevas se cuelgan de esa misma promesa.
+let syncInFlight: Promise<SyncResult> | null = null;
+
+export function performBidirectionalSync(): Promise<SyncResult> {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = doBidirectionalSync().finally(() => {
+    syncInFlight = null;
+  });
+  return syncInFlight;
+}
+
+async function doBidirectionalSync(): Promise<SyncResult> {
   const versionStatus = await checkAppVersion();
   if (!versionStatus.isUpdated) {
     return {

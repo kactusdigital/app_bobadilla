@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Worker, MasterCatalogs, formatCurrency, localDateStr } from '../types';
 import { performBidirectionalSync, getCurrentSupabaseUser, registerSupabaseUser, fetchAuditLogs, AuditLogItem } from '../supabaseClient';
 import { Database, Plus, Edit2, Trash2, ShieldCheck, Eye, EyeOff, CheckCircle2, AlertTriangle, Play, RefreshCw, MapPin, Leaf, BookOpen, Clock, Loader2, Coins, History, FileText, Terminal, Download, Upload, Lock } from 'lucide-react';
-import * as XLSX from 'xlsx';
 
 interface ConfigProps {
   workers: Worker[];
@@ -277,7 +276,9 @@ export default function Config({ workers, catalogs, onUpdateWorkers, onUpdateCat
     setShowWorkerModal(false);
   };
 
-  const handleExportWorkersExcel = () => {
+  const handleExportWorkersExcel = async () => {
+    // Import dinámico: xlsx solo se carga al exportar (no infla el bundle inicial)
+    const XLSX = await import('xlsx');
     const data = workers.map(w => ({
       'Legajo': w.legajo,
       'Nombre': w.name,

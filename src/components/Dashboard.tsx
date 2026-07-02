@@ -30,6 +30,8 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
   // "hoy" pasaba a ser mañana y la tarjeta Registros Hoy quedaba en 0.
   const todayStr = useMemo(() => localDateStr(), []);
 
+  const workerById = useMemo(() => new Map(workers.map(w => [w.id, w])), [workers]);
+
   const stats = useMemo(() => {
     const todayEntries = activeEntries.filter(e => e.date === todayStr);
     const todayCount = todayEntries.length;
@@ -104,7 +106,7 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
   }, [activeEntries]);
 
   const getWorkerInitials = (workerId: string) => {
-    const worker = workers.find(w => w.id === workerId);
+    const worker = workerById.get(workerId);
     if (!worker) return '??';
     const parts = worker.name.split(' ');
     if (parts.length >= 2) {
@@ -114,7 +116,7 @@ export default function Dashboard({ entries, workers, onNavigate, userRole, curr
   };
 
   const getWorkerName = (workerId: string) => {
-    return workers.find(w => w.id === workerId)?.name || 'Trabajador';
+    return workerById.get(workerId)?.name || 'Trabajador';
   };
 
   return (

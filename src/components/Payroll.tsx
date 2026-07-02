@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Entry, Worker, MasterCatalogs, localDateStr } from '../types';
 import { FileText, Download, Calendar, DollarSign, Users, AlertCircle, Search, Filter, Lock, RefreshCw, X, FileSpreadsheet } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { generateEntryId } from '../supabaseClient';
 
 interface PayrollProps {
@@ -56,6 +55,19 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     return ['Todas', ...Array.from(list)];
   }, [workers]);
 
+  // Índices para evitar búsquedas O(trabajadores x registros) en cada cálculo
+  const workerById = useMemo(() => new Map(workers.map(w => [w.id, w])), [workers]);
+  const entriesByWorker = useMemo(() => {
+    const m = new Map<string, Entry[]>();
+    for (const e of entries) {
+      if (e.deleted) continue;
+      const arr = m.get(e.worker_id);
+      if (arr) arr.push(e);
+      else m.set(e.worker_id, [e]);
+    }
+    return m;
+  }, [entries]);
+
   const activeWorkers = useMemo(() => {
     return workers.filter(w => {
       if (!w.isActive) return false;
@@ -74,7 +86,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     const periods = new Set<string>();
     entries.forEach(e => {
       if (e.deleted) return;
-      const w = workers.find(wk => wk.id === e.worker_id);
+      const w = workerById.get(e.worker_id);
       if (!w) return;
 
       const [year, month, day] = e.date.split('-');
@@ -108,7 +120,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       }
     });
     return Array.from(periods).sort().reverse();
-  }, [entries, workers, activeTab, periodoMode]);
+  }, [entries, workerById, activeTab, periodoMode]);
 
   React.useEffect(() => {
     if (availablePeriods.length > 0) {
@@ -158,15 +170,15 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
       !e.deleted &&
       !e.locked &&
       e.date < customStartDate &&
-      workers.find(w => w.id === e.worker_id)?.regime === 'temporal'
+      workerById.get(e.worker_id)?.regime === 'temporal'
     );
-  }, [entries, workers, activeTab, periodoMode, customStartDate]);
+  }, [entries, workerById, activeTab, periodoMode, customStartDate]);
 
   const payrollRows = useMemo(() => {
     return activeWorkers.map(worker => {
       let hours = 0, bruto = 0, adelantoEfectivo = 0, adelantoTransferencia = 0, descuentos = 0;
       let state: 'paid' | 'pending' | 'warning' = 'pending';
-      const workerEntries = entries.filter(e => e.worker_id === worker.id && !e.deleted);
+      const workerEntries = entriesByWorker.get(worker.id) || [];
       
       const defaultWorkerInfo = { id: worker.id, name: worker.name, category: worker.category, regime: worker.regime, hours, bruto, adelantoEfectivo, adelantoTransferencia, descuentos, neto: 0, state };
 
@@ -237,7 +249,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     });
     // showOnlyPending y periodoMode FALTABAN en las dependencias: el checkbox
     // "Ocultar ya liquidados" no refrescaba la tabla hasta tocar otro filtro.
-  }, [activeWorkers, entries, activeTab, selectedPeriodRange, filterPaymentMethod, showOnlyPending, periodoMode]);
+  }, [activeWorkers, entriesByWorker, activeTab, selectedPeriodRange, filterPaymentMethod, showOnlyPending, periodoMode]);
 
   const summaryMetrics = useMemo(() => ({
     totalNet: payrollRows.reduce((s, r) => s + r.neto, 0),
@@ -249,11 +261,14 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(amount);
   };
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!selectedPeriod && !(activeTab === 'weekly' && periodoMode !== 'quincenal')) {
       alert("No hay período seleccionado para exportar.");
       return;
     }
+
+    // Import dinámico: xlsx solo se carga al exportar (no infla el bundle inicial)
+    const XLSX = await import('xlsx');
     
     let periodName = selectedPeriod;
     if (activeTab === 'weekly' && periodoMode !== 'quincenal') {
@@ -316,7 +331,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     }
 
     const detRows = detailedEntries.sort((a, b) => a.date.localeCompare(b.date)).map(e => {
-      const workerInfo = workers.find(w => w.id === e.worker_id);
+      const workerInfo = workerById.get(e.worker_id);
       const [year, month, day] = e.date.split('-');
       return {
         'Fecha': e.date,
@@ -487,11 +502,13 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     }
   };
 
-  const handleExportMonthlyTemporaries = () => {
+  const handleExportMonthlyTemporaries = async () => {
     if (!selectedMonthReport) {
       alert("No hay mes seleccionado.");
       return;
     }
+
+    const XLSX = await import('xlsx');
     
     const tempWorkers = workers.filter(w => w.isActive && w.regime === 'temporal');
     const [y, m] = selectedMonthReport.split('-');
@@ -550,7 +567,7 @@ export default function Payroll({ entries, workers, catalogs, periodoMode = 'sem
     let detailedEntries = monthEntries.filter(e => validWorkerIds.includes(e.worker_id));
     
     const detRows = detailedEntries.sort((a, b) => a.date.localeCompare(b.date)).map(e => {
-      const workerInfo = workers.find(w => w.id === e.worker_id);
+      const workerInfo = workerById.get(e.worker_id);
       const [year, month, day] = e.date.split('-');
       return {
         'Fecha': e.date,
