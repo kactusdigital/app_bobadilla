@@ -1,4 +1,4 @@
-export const APP_VERSION = '2.7.1';
+export const APP_VERSION = '2.7.2';
 
 // Cache del resultado: el chequeo corre en CADA sincronización (o sea, en cada
 // alta/edición/borrado de un parte) y no tiene sentido pegarle al servidor con

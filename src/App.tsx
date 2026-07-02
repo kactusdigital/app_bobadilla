@@ -607,7 +607,7 @@ export default function App() {
             <span className="w-2.5 h-2.5 rounded-full bg-[#006e1c] animate-pulse" />
             <p className="text-[10px] font-bold text-[#717a6d] uppercase tracking-wide">Modo Offline Activo</p>
           </div>
-          <p className="text-[9px] text-[#717a6d] px-2">v2.7.1 • Sincronizado Supabase</p>
+          <p className="text-[9px] text-[#717a6d] px-2">v2.7.2 • Sincronizado Supabase</p>
         </footer>
       </aside>
 
@@ -838,7 +838,7 @@ export default function App() {
 
             <footer className="border-t border-[#c0c9bb]/30 pt-4 flex flex-col gap-2 text-[10px] text-[#717a6d]">
               <div>
-                <p className="font-bold">Bobadilla Viveros v2.7.1</p>
+                <p className="font-bold">Bobadilla Viveros v2.7.2</p>
                 <p>Sincronización Supabase CDN</p>
               </div>
               <button
