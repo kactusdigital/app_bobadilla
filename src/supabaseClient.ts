@@ -778,6 +778,15 @@ async function doBidirectionalSync(): Promise<SyncResult> {
     // ----------------------------------------
     // 6. Compare local vs server and identify toUpload
     // ----------------------------------------
+    // RLS Fase 2 (roles en la base): el servidor solo acepta INSERT/UPDATE de
+    // cualquier created_by a direccion/admin; el encargado solo lo propio y el
+    // visor nada. La caché local puede contener registros ajenos (bajados en
+    // versiones previas): sin este filtro, UN registro ajeno en el payload
+    // haría fallar el chunk COMPLETO del upsert y arrastraría los partes
+    // propios del mismo chunk. Un rol desconocido se trata como "solo lo suyo".
+    const role = currentUserObj.role;
+    const canUploadAny = role === 'direccion' || role === 'admin';
+
     const payloadsToUpload: any[] = [];
     const updatedLocalEntries: Entry[] = [];
 
@@ -792,8 +801,11 @@ async function doBidirectionalSync(): Promise<SyncResult> {
       const serverUpdatedAt = s?.created_at ? new Date(s.created_at).getTime() : 0;
       const localUpdatedAt = entry.updated_at ? new Date(entry.updated_at).getTime() : Date.now();
 
+      const effectiveCreatedBy = entry.created_by || currentUserObj.id;
+      const allowedToUpload = role !== 'visor' && (canUploadAny || effectiveCreatedBy === currentUserObj.id);
+
       // If local is strictly newer, or it doesn't exist on server, we upload it
-      if (!s || localUpdatedAt > serverUpdatedAt) {
+      if ((!s || localUpdatedAt > serverUpdatedAt) && allowedToUpload) {
         const dateObj = new Date(entry.date + 'T12:00:00');
         const daysInSpanish = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
         const monthsInSpanish = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
